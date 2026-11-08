@@ -6,7 +6,8 @@ const KEYS = {
   config: 'wt.config',
   session: 'wt.session',
   outbox: 'wt.outbox',
-  cache: 'wt.cache'
+  cache: 'wt.cache',
+  history: 'wt.history'
 };
 
 function load(key, fallback) {
@@ -29,6 +30,10 @@ const state = {
   outbox: load(KEYS.outbox, []),
   // Last data from the Sheet: { exercises: [names], last: { name: [{ setNumber, weight, reps }] } }
   cache: load(KEYS.cache, { exercises: [], last: {} }),
+  // Past sessions, newest first (see history_ in Code.gs). `pending` = finished here, not yet synced
+  history: load(KEYS.history, { sessions: [], total: 0 }),
+  expanded: new Set(),
+  loadingMore: false,
   syncing: false,
   error: '',
   refreshAfterSync: false
@@ -174,6 +179,7 @@ async function refresh({ quiet = true } = {}) {
     const res = await api({ action: 'bootstrap', exclude: state.session ? state.session.id : '' });
     state.cache.last = res.last || {};
     mergeExercises(res.exercises || []);
+    if (res.history) applyHistory(res.history, false);
     state.error = '';
     if (!isTyping()) render();
     else renderStatus();
@@ -184,6 +190,65 @@ async function refresh({ quiet = true } = {}) {
     if (!quiet) throw err;
     return false;
   }
+}
+
+/* ================= History ================= */
+
+function applyHistory(h, append) {
+  const server = h.sessions || [];
+  if (append) {
+    const have = new Set(state.history.sessions.map((s) => s.id));
+    state.history.sessions.push(...server.filter((s) => !have.has(s.id)));
+  } else {
+    // Keep workouts finished offline that haven't reached the Sheet yet
+    const onServer = new Set(server.map((s) => s.id));
+    const unsynced = new Set(state.outbox.filter((o) => o.type === 'upsert').map((o) => o.set.sessionId));
+    const keep = state.history.sessions.filter((s) => s.pending && unsynced.has(s.id) && !onServer.has(s.id));
+    state.history.sessions = [...keep, ...server];
+  }
+  const pendingCount = state.history.sessions.filter((s) => s.pending).length;
+  state.history.total = (h.total || 0) + pendingCount;
+  save(KEYS.history, state.history);
+}
+
+async function loadMoreHistory() {
+  if (state.loadingMore || !configured()) return;
+  state.loadingMore = true;
+  render();
+  try {
+    const offset = state.history.sessions.filter((s) => !s.pending).length;
+    const res = await api({ action: 'history', offset, limit: 20 });
+    applyHistory(res, true);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    state.loadingMore = false;
+    render();
+  }
+}
+
+/** Summary of a just-finished session, shown in history before the Sheet confirms it. */
+function summarizeSession(sess) {
+  const exercises = sess.exercises
+    .map((ex) => ({
+      name: ex.name,
+      volume: exerciseVolume(ex),
+      sets: ex.sets
+        .map((s, i) => (s.done ? { setNumber: i + 1, weight: s.weight || 0, reps: s.reps } : null))
+        .filter(Boolean)
+    }))
+    .filter((e) => e.sets.length);
+  const times = sess.exercises.flatMap((ex) => ex.sets.filter((s) => s.done).map((s) => Date.parse(s.loggedAt) || 0));
+  return {
+    id: sess.id,
+    date: sess.date,
+    start: Math.min(...times),
+    end: Math.max(...times),
+    volume: sessionVolume(),
+    sets: sessionSetCount(),
+    exercises,
+    pending: true
+  };
 }
 
 const isTyping = () => document.activeElement && document.activeElement.tagName === 'INPUT';
@@ -224,6 +289,63 @@ function homeHTML() {
       <h2>Ready to lift?</h2>
       <p>${esc(date)}</p>
       <button class="btn primary" data-action="start">Start workout</button>
+    </section>
+    ${historyHTML()}`;
+}
+
+function historyHTML() {
+  const { sessions, total } = state.history;
+  if (!sessions.length) {
+    return `<h3 class="section-title">History</h3>
+      <p class="empty">Your finished workouts will show up here.</p>`;
+  }
+  const loaded = sessions.filter((s) => !s.pending).length;
+  const unsyncedCount = sessions.length - loaded;
+  return `
+    <h3 class="section-title">History <span>${total} workout${total === 1 ? '' : 's'}</span></h3>
+    ${sessions.map(historyCardHTML).join('')}
+    ${loaded + unsyncedCount < total
+      ? `<button class="btn ghost wide" data-action="more-history">${state.loadingMore ? 'Loading…' : 'Load more'}</button>`
+      : ''}`;
+}
+
+function historyCardHTML(s) {
+  const open = state.expanded.has(s.id);
+  const [y, m, d] = String(s.date).split('-').map(Number);
+  const date = y ? new Date(y, m - 1, d) : new Date(s.start);
+  const dateLabel = date.toLocaleDateString(undefined, {
+    weekday: 'short', day: 'numeric', month: 'short',
+    year: date.getFullYear() !== new Date().getFullYear() ? 'numeric' : undefined
+  });
+  const mins = s.start && s.end ? Math.round((s.end - s.start) / 60000) : 0;
+  const meta = [
+    `${s.sets} set${s.sets === 1 ? '' : 's'}`,
+    `${s.exercises.length} exercise${s.exercises.length === 1 ? '' : 's'}`,
+    mins >= 1 ? `${mins} min` : ''
+  ].filter(Boolean).join(' · ');
+
+  const body = open
+    ? `<div class="history-body">
+        ${s.exercises.map((e) => `
+          <div class="history-ex">
+            <div class="history-ex-head"><span>${esc(e.name)}</span><span>${fmt(e.volume)} kg</span></div>
+            <div class="history-sets">
+              ${e.sets.map((x) => `<span>${fmt(x.weight)} × ${x.reps}</span>`).join('')}
+            </div>
+          </div>`).join('')}
+      </div>`
+    : `<p class="history-names">${esc(s.exercises.map((e) => e.name).join(', '))}</p>`;
+
+  return `
+    <section class="card history${open ? ' open' : ''}" data-sid="${esc(s.id)}">
+      <button class="history-head" data-action="toggle-history" aria-expanded="${open}">
+        <div>
+          <div class="history-date">${esc(dateLabel)}${s.pending ? ' <span class="tag">Not synced</span>' : ''}</div>
+          <div class="history-meta">${meta}</div>
+        </div>
+        <div class="history-vol">${fmt(s.volume)} kg<span class="chev">${open ? '▴' : '▾'}</span></div>
+      </button>
+      ${body}
     </section>`;
 }
 
@@ -402,6 +524,13 @@ function finishWorkout() {
   } else if (!confirm(`Finish workout?\n${sets} sets · ${fmt(vol)} kg total`)) {
     return;
   }
+  if (sets) {
+    const summary = summarizeSession(state.session);
+    const existed = state.history.sessions.some((s) => s.id === summary.id);
+    state.history.sessions = [summary, ...state.history.sessions.filter((s) => s.id !== summary.id)];
+    if (!existed) state.history.total += 1;
+    save(KEYS.history, state.history);
+  }
   state.session = null;
   saveSession();
   render();
@@ -465,6 +594,14 @@ $('#main').addEventListener('click', (e) => {
     case 'add-set': addSet(ei); break;
     case 'toggle-set': toggleSet(ei, si, row); break;
     case 'finish': finishWorkout(); break;
+    case 'more-history': loadMoreHistory(); break;
+    case 'toggle-history': {
+      const id = btn.closest('[data-sid]').dataset.sid;
+      if (state.expanded.has(id)) state.expanded.delete(id);
+      else state.expanded.add(id);
+      render();
+      break;
+    }
   }
 });
 

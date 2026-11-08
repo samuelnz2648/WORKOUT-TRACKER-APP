@@ -1,5 +1,5 @@
 // Bump this when you change any app file, so phones pick up the new version.
-const CACHE = 'workout-tracker-v1';
+const CACHE = 'workout-tracker-v2';
 
 const ASSETS = [
   './',
@@ -13,7 +13,12 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // cache: 'reload' skips the browser's HTTP cache so a new version gets fresh files
+  event.waitUntil(
+    caches.open(CACHE)
+      .then((c) => c.addAll(ASSETS.map((url) => new Request(url, { cache: 'reload' }))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (event) => {

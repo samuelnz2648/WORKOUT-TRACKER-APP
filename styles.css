@@ -70,7 +70,7 @@ main {
 
 /* ---------- Home ---------- */
 .hero {
-  text-align: center; padding: 48px 20px;
+  text-align: center; padding: 32px 20px;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
 }
 .hero h2 { margin: 0 0 4px; font-size: 1.5rem; }
@@ -165,3 +165,39 @@ dialog input {
   padding: 10px 18px; border-radius: 999px; transition: .2s; max-width: 90vw; text-align: center;
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ---------- History ---------- */
+.section-title {
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin: 10px 2px 0; font-size: 1rem;
+}
+.section-title span { color: var(--muted); font-weight: 400; font-size: .85rem; }
+
+.card.history { padding: 0; overflow: hidden; }
+.history-head {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: none; border: 0; padding: 14px 14px 4px; text-align: left;
+}
+.card.history.open .history-head { padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.history-date { font-weight: 600; }
+.history-meta { color: var(--muted); font-size: .85rem; margin-top: 2px; }
+.history-vol { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chev { color: var(--muted); margin-left: 8px; font-size: .8rem; }
+.history-names {
+  margin: 0; padding: 0 14px 14px; color: var(--muted); font-size: .85rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tag {
+  display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 999px;
+  background: #2a2312; color: #fcd34d; font-size: .7rem; font-weight: 600; vertical-align: middle;
+}
+.history-body { padding: 4px 14px 12px; }
+.history-ex { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.history-ex:last-child { border-bottom: 0; }
+.history-ex-head { display: flex; justify-content: space-between; font-weight: 600; font-size: .95rem; }
+.history-ex-head span:last-child { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+.history-sets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.history-sets span {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 4px 10px; font-size: .88rem; font-variant-numeric: tabular-nums;
+}
