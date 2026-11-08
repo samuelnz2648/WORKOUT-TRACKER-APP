@@ -23,8 +23,25 @@
   <!-- Add exercise -->
   <dialog id="exerciseDialog">
     <form id="exerciseForm" method="dialog">
-      <h2>Add exercise</h2>
+      <div class="dialog-head">
+        <h2>Add exercise</h2>
+        <select id="exerciseFilter" aria-label="Filter by category">
+          <option value="ALL">All</option>
+          <option value="PUSH">Push</option>
+          <option value="PULL">Pull</option>
+          <option value="LEGS">Legs</option>
+          <option value="NONE">Uncategorised</option>
+        </select>
+      </div>
       <input id="exerciseName" type="text" placeholder="Search or type a new name" autocomplete="off" required>
+      <div id="catPicker" class="cat-picker" hidden>
+        <span id="catPickerLabel"></span>
+        <div class="seg">
+          <button type="button" data-cat="PUSH" class="cat-PUSH">Push</button>
+          <button type="button" data-cat="PULL" class="cat-PULL">Pull</button>
+          <button type="button" data-cat="LEGS" class="cat-LEGS">Legs</button>
+        </div>
+      </div>
       <div id="exerciseChips" class="chips"></div>
       <div class="dialog-actions">
         <button type="button" class="btn ghost" data-close>Cancel</button>

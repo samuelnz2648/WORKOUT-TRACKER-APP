@@ -34,10 +34,14 @@ const state = {
   history: load(KEYS.history, { sessions: [], total: 0 }),
   expanded: new Set(),
   loadingMore: false,
+  exFilter: 'ALL',   // add-exercise dialog filter: ALL | PUSH | PULL | LEGS | NONE
+  dialogCat: null,   // category picked in the add-exercise dialog
   syncing: false,
   error: '',
   refreshAfterSync: false
 };
+
+state.cache.categories = state.cache.categories || {}; // { exerciseName: 'PUSH'|'PULL'|'LEGS' }
 
 const saveSession = () => save(KEYS.session, state.session);
 const saveOutbox = () => save(KEYS.outbox, state.outbox);
@@ -68,6 +72,50 @@ function toast(msg, ms = 2400) {
   clearTimeout(toast._t);
   toast._t = setTimeout(() => el.classList.remove('show'), ms);
 }
+
+/* ================= Categories ================= */
+
+const CATS = ['PUSH', 'PULL', 'LEGS'];
+const CAT_LABEL = { PUSH: 'Push', PULL: 'Pull', LEGS: 'Legs' };
+
+function catOf(name) {
+  const c = state.cache.categories;
+  if (c[name] !== undefined) return c[name] || '';
+  const key = Object.keys(c).find((k) => k.toLowerCase() === String(name).toLowerCase());
+  return key ? c[key] || '' : '';
+}
+
+function setCategory(name, cat) {
+  state.cache.categories[name] = cat;
+  saveCache();
+  queue({ type: 'category', name, category: cat });
+}
+
+/**
+ * Workout type from the categories of the sets done:
+ *   one category only      → PUSH / PULL / LEGS
+ *   push + pull            → UPPER
+ *   legs + upper, legs ≥ ⅔ of sets → LOWER
+ *   any other mix with legs → TOTAL BODY
+ * Uncategorised exercises are ignored.
+ */
+function sessionLabel(s) {
+  const counts = { PUSH: 0, PULL: 0, LEGS: 0 };
+  s.exercises.forEach((e) => {
+    const c = catOf(e.name);
+    if (c) counts[c] += e.sets.length;
+  });
+  const legs = counts.LEGS;
+  const total = counts.PUSH + counts.PULL + legs;
+  if (!total) return '';
+  const present = CATS.filter((c) => counts[c]);
+  if (present.length === 1) return present[0];
+  if (!legs) return 'UPPER';
+  if (legs / total >= 2 / 3) return 'LOWER';
+  return 'TOTAL BODY';
+}
+
+const labelClass = (label) => 'split-' + label.toLowerCase().replace(/\s+/g, '-');
 
 /* ================= Totals ================= */
 
@@ -112,6 +160,11 @@ function queue(op) {
     state.outbox = state.outbox.filter((o) =>
       !((o.type === 'upsert' && o.set.id === id) || (o.type === 'delete' && o.id === id)));
   }
+  // Only the newest category change per exercise matters
+  if (op.type === 'category') {
+    state.outbox = state.outbox.filter((o) =>
+      !(o.type === 'category' && o.name.toLowerCase() === op.name.toLowerCase()));
+  }
   state.outbox.push(op);
   saveOutbox();
   renderStatus();
@@ -143,6 +196,7 @@ async function sync() {
     state.outbox = state.outbox.filter((o) => !applied.has(o.opId));
     saveOutbox();
     if (Array.isArray(res.exercises)) mergeExercises(res.exercises);
+    if (res.categories) mergeCategories(res.categories);
     state.error = '';
   } catch (err) {
     state.error = err.message;
@@ -172,6 +226,16 @@ function mergeExercises(fromServer) {
   saveCache();
 }
 
+/** Server categories, with any not-yet-synced local changes on top. */
+function mergeCategories(fromServer) {
+  const cats = { ...fromServer };
+  state.outbox.forEach((o) => {
+    if ((o.type === 'exercise' || o.type === 'category') && o.category !== undefined) cats[o.name] = o.category || '';
+  });
+  state.cache.categories = cats;
+  saveCache();
+}
+
 /** Pull exercise list + "last time" data from the Sheet. */
 async function refresh({ quiet = true } = {}) {
   if (!configured() || !navigator.onLine) return false;
@@ -179,6 +243,7 @@ async function refresh({ quiet = true } = {}) {
     const res = await api({ action: 'bootstrap', exclude: state.session ? state.session.id : '' });
     state.cache.last = res.last || {};
     mergeExercises(res.exercises || []);
+    if (res.categories) mergeCategories(res.categories);
     if (res.history) applyHistory(res.history, false);
     state.error = '';
     if (!isTyping()) render();
@@ -259,7 +324,7 @@ function deleteSession(id, removeExercises) {
   // Drop any unsent writes for this session (and for exercises being removed)
   state.outbox = state.outbox.filter((o) =>
     !(o.type === 'upsert' && o.set.sessionId === id) &&
-    !(o.type === 'exercise' && removedLower.has(o.name.toLowerCase())));
+    !((o.type === 'exercise' || o.type === 'category') && removedLower.has(o.name.toLowerCase())));
   saveOutbox();
 
   state.history.sessions = state.history.sessions.filter((x) => x.id !== id);
@@ -383,11 +448,18 @@ function historyCardHTML(s) {
     mins >= 1 ? `${mins} min` : ''
   ].filter(Boolean).join(' · ');
 
+  const label = sessionLabel(s);
+  const badge = label ? `<span class="split ${labelClass(label)}">${label}</span>` : '';
+  const exCat = (name) => {
+    const c = catOf(name);
+    return c ? ` <small class="ex-cat cat-${c}">${CAT_LABEL[c]}</small>` : '';
+  };
+
   const body = open
     ? `<div class="history-body">
         ${s.exercises.map((e) => `
           <div class="history-ex">
-            <div class="history-ex-head"><span>${esc(e.name)}</span><span>${fmt(e.volume)} kg</span></div>
+            <div class="history-ex-head"><span>${esc(e.name)}${exCat(e.name)}</span><span>${fmt(e.volume)} kg</span></div>
             <div class="history-sets">
               ${e.sets.map((x) => `<span>${fmt(x.weight)} × ${x.reps}</span>`).join('')}
             </div>
@@ -400,7 +472,7 @@ function historyCardHTML(s) {
     <section class="card history${open ? ' open' : ''}" data-sid="${esc(s.id)}">
       <button class="history-head" data-action="toggle-history" aria-expanded="${open}">
         <div>
-          <div class="history-date">${esc(dateLabel)}${s.pending ? ' <span class="tag">Not synced</span>' : ''}</div>
+          <div class="history-date">${badge}${esc(dateLabel)}${s.pending ? ' <span class="tag">Not synced</span>' : ''}</div>
           <div class="history-meta">${meta}</div>
         </div>
         <div class="history-vol">${fmt(s.volume)} kg<span class="chev">${open ? '▴' : '▾'}</span></div>
@@ -434,7 +506,10 @@ function exerciseHTML(ex, ei) {
     <section class="card" data-ei="${ei}">
       <header>
         <h2>${esc(ex.name)}</h2>
-        <button class="icon" data-action="remove-exercise" aria-label="Remove ${esc(ex.name)}">✕</button>
+        <div class="card-actions">
+          ${categorySelectHTML(ex.name)}
+          <button class="icon" data-action="remove-exercise" aria-label="Remove ${esc(ex.name)}">✕</button>
+        </div>
       </header>
       <p class="last">${esc(lastLine)}</p>
       <div class="set-head"><span>Set</span><span>kg</span><span>Reps</span><span></span></div>
@@ -444,6 +519,15 @@ function exerciseHTML(ex, ei) {
         <span class="ex-total" data-ex-total="${ei}"></span>
       </footer>
     </section>`;
+}
+
+function categorySelectHTML(name) {
+  const c = catOf(name);
+  return `
+    <select class="cat-select ${c ? 'cat-' + c : 'cat-none'}" data-cat-select aria-label="Category for ${esc(name)}">
+      <option value=""${c ? '' : ' selected'} disabled>Category?</option>
+      ${CATS.map((k) => `<option value="${k}"${k === c ? ' selected' : ''}>${CAT_LABEL[k]}</option>`).join('')}
+    </select>`;
 }
 
 function setHTML(ex, s, si) {
@@ -500,7 +584,7 @@ function startWorkout() {
   openExerciseDialog();
 }
 
-function addExerciseToSession(rawName) {
+function addExerciseToSession(rawName, category) {
   const name = rawName.trim().replace(/\s+/g, ' ');
   if (!name) return;
   const existing = state.cache.exercises.find((n) => n.toLowerCase() === name.toLowerCase());
@@ -513,8 +597,11 @@ function addExerciseToSession(rawName) {
   if (!existing) {
     state.cache.exercises.push(canonical);
     state.cache.exercises.sort((a, b) => a.localeCompare(b));
+    state.cache.categories[canonical] = category || '';
     saveCache();
-    queue({ type: 'exercise', name: canonical });
+    queue({ type: 'exercise', name: canonical, category: category || '' });
+  } else if (category && catOf(existing) !== category) {
+    setCategory(existing, category);
   }
   // Start with as many rows as last time, so every placeholder lines up
   const lastCount = (state.cache.last[canonical] || []).length || 1;
@@ -604,22 +691,74 @@ function finishWorkout() {
 function openExerciseDialog() {
   const dlg = $('#exerciseDialog');
   $('#exerciseName').value = '';
-  renderChips('');
+  $('#exerciseFilter').value = state.exFilter;
+  state.dialogCat = CATS.includes(state.exFilter) ? state.exFilter : null;
+  renderChips();
   dlg.showModal();
-  setTimeout(() => $('#exerciseName').focus(), 50);
 }
 
-function renderChips(query) {
-  const q = query.trim().toLowerCase();
+const cleanName = (s) => s.trim().replace(/\s+/g, ' ');
+const findExercise = (name) => state.cache.exercises.find((n) => n.toLowerCase() === name.toLowerCase());
+
+function renderChips() {
+  const query = cleanName($('#exerciseName').value);
+  const q = query.toLowerCase();
+  const f = state.exFilter;
   const inSession = new Set((state.session ? state.session.exercises : []).map((e) => e.name.toLowerCase()));
-  const matches = state.cache.exercises.filter((n) => !inSession.has(n.toLowerCase()) && n.toLowerCase().includes(q));
-  const exact = state.cache.exercises.some((n) => n.toLowerCase() === q);
-  const chips = matches.map((n) => `<button type="button" class="chip" data-name="${esc(n)}">${esc(n)}</button>`);
+  const matches = state.cache.exercises.filter((n) => {
+    if (inSession.has(n.toLowerCase()) || !n.toLowerCase().includes(q)) return false;
+    const c = catOf(n);
+    return f === 'ALL' || (f === 'NONE' ? !c : c === f);
+  });
+  const exact = findExercise(query);
+  const chips = matches.map((n) => {
+    const c = catOf(n);
+    return `<button type="button" class="chip${exact === n ? ' selected' : ''}" data-name="${esc(n)}">${esc(n)}` +
+      `<span class="chip-cat ${c ? 'cat-' + c : 'cat-none'}">${c ? CAT_LABEL[c] : '?'}</span></button>`;
+  });
   if (q && !exact) {
-    chips.unshift(`<button type="button" class="chip new" data-name="${esc(query.trim())}">+ Create "${esc(query.trim())}"</button>`);
+    chips.unshift(`<button type="button" class="chip new" data-new="1">+ Create "${esc(query)}"</button>`);
   }
+  const what = { PUSH: 'push', PULL: 'pull', LEGS: 'legs', NONE: 'uncategorised' }[f];
   $('#exerciseChips').innerHTML = chips.join('') ||
-    '<span class="msg">Type a name to create your first exercise.</span>';
+    `<span class="msg">${what ? `No ${what} exercises${q ? ' match' : ' yet'}.` : 'No exercises yet.'} Type a name to create one.</span>`;
+  updatePicker();
+}
+
+/** The exercise that still needs a category before it can be added (new, or existing without one). */
+function pickerTarget() {
+  const name = cleanName($('#exerciseName').value);
+  if (!name) return null;
+  const existing = findExercise(name);
+  if (existing && catOf(existing)) return null;
+  return { name: existing || name, isNew: !existing };
+}
+
+function updatePicker() {
+  const t = pickerTarget();
+  $('#catPicker').hidden = !t;
+  if (!t) return;
+  $('#catPickerLabel').textContent = t.isNew
+    ? `Category for "${t.name}"`
+    : `${t.name} has no category yet. Pick one:`;
+  document.querySelectorAll('#catPicker [data-cat]').forEach((b) =>
+    b.classList.toggle('active', b.dataset.cat === state.dialogCat));
+}
+
+function submitExercise() {
+  const name = cleanName($('#exerciseName').value);
+  if (!name) return;
+  const t = pickerTarget();
+  if (t && !state.dialogCat) {
+    const el = $('#catPicker');
+    el.classList.remove('shake');
+    void el.offsetWidth;
+    el.classList.add('shake');
+    toast('Pick Push, Pull or Legs');
+    return;
+  }
+  $('#exerciseDialog').close();
+  addExerciseToSession(name, t ? state.dialogCat : null);
 }
 
 function openSettings() {
@@ -684,19 +823,44 @@ $('#main').addEventListener('input', (e) => {
   saveSession();
 });
 
+// Category change on an exercise card
+$('#main').addEventListener('change', (e) => {
+  if (!e.target.matches('[data-cat-select]') || !state.session) return;
+  const { ei } = locate(e.target);
+  setCategory(state.session.exercises[ei].name, e.target.value);
+  render();
+});
+
 // Exercise dialog
-$('#exerciseName').addEventListener('input', (e) => renderChips(e.target.value));
+$('#exerciseName').addEventListener('input', renderChips);
+$('#exerciseFilter').addEventListener('change', (e) => {
+  state.exFilter = e.target.value;
+  state.dialogCat = CATS.includes(state.exFilter) ? state.exFilter : null;
+  renderChips();
+});
+$('#catPicker').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-cat]');
+  if (!b) return;
+  state.dialogCat = b.dataset.cat;
+  updatePicker();
+});
 $('#exerciseChips').addEventListener('click', (e) => {
   const chip = e.target.closest('.chip');
   if (!chip) return;
-  $('#exerciseDialog').close();
-  addExerciseToSession(chip.dataset.name);
+  if (chip.dataset.new) return submitExercise();
+  const name = chip.dataset.name;
+  if (catOf(name)) {
+    $('#exerciseDialog').close();
+    addExerciseToSession(name);
+  } else {
+    // Existing but uncategorised: select it and ask for a category
+    $('#exerciseName').value = name;
+    renderChips();
+  }
 });
 $('#exerciseForm').addEventListener('submit', (e) => {
   e.preventDefault();
-  const name = $('#exerciseName').value;
-  $('#exerciseDialog').close();
-  addExerciseToSession(name);
+  submitExercise();
 });
 
 // Delete dialog

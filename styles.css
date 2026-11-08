@@ -209,3 +209,56 @@ dialog input {
 .check-row { display: flex; gap: 10px; align-items: flex-start; color: var(--text) !important; font-size: .92rem !important; }
 .check-row[hidden] { display: none; }
 dialog .check-row input { display: inline-block; width: 20px; height: 20px; margin: 2px 0 0; flex: none; accent-color: var(--danger); }
+
+/* ---------- Categories ---------- */
+:root {
+  --push: #fb923c;
+  --pull: #60a5fa;
+  --legs: #c084fc;
+}
+.cat-PUSH { --cat: var(--push); }
+.cat-PULL { --cat: var(--pull); }
+.cat-LEGS { --cat: var(--legs); }
+.cat-none { --cat: var(--muted); }
+
+.dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
+.dialog-head h2 { margin: 0; }
+dialog select, .cat-select {
+  background: var(--surface-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 10px; padding: 8px 10px; font: inherit; font-size: .9rem;
+}
+
+.chip { display: inline-flex; align-items: center; gap: 8px; }
+.chip.selected { border-color: var(--accent); }
+.chip-cat {
+  font-size: .68rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--cat); border: 1px solid var(--cat); border-radius: 999px; padding: 1px 6px;
+}
+
+.cat-picker { margin-top: 12px; padding: 12px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--border); }
+.cat-picker[hidden] { display: none; }
+.cat-picker > span { display: block; font-size: .88rem; color: var(--muted); margin-bottom: 8px; }
+.cat-picker.shake { animation: shake .3s; }
+.seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.seg button {
+  padding: 10px; border-radius: 10px; font-weight: 700;
+  background: transparent; border: 1px solid var(--cat); color: var(--cat);
+}
+.seg button.active { background: var(--cat); color: #111; }
+
+.card-actions { display: flex; align-items: center; gap: 4px; }
+.cat-select { padding: 4px 8px; font-size: .8rem; font-weight: 600; color: var(--cat); border-color: var(--cat); }
+
+.split {
+  display: inline-block; margin-right: 8px; padding: 2px 8px; border-radius: 6px;
+  font-size: .7rem; font-weight: 800; letter-spacing: .05em; vertical-align: 2px;
+  color: #111; background: var(--split);
+}
+.split-push { --split: var(--push); }
+.split-pull { --split: var(--pull); }
+.split-legs { --split: var(--legs); }
+.split-upper { --split: #2dd4bf; }
+.split-lower { --split: #f472b6; }
+.split-total-body { --split: var(--accent); }
+
+.ex-cat { color: var(--cat); font-weight: 600; font-size: .72rem; margin-left: 4px; text-transform: uppercase; }
