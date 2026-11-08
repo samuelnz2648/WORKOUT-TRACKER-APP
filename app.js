@@ -7,7 +7,8 @@ const KEYS = {
   session: 'wt.session',
   outbox: 'wt.outbox',
   cache: 'wt.cache',
-  history: 'wt.history'
+  history: 'wt.history',
+  focus: 'wt.focus'   // the box you were typing in, if you left the app mid-edit
 };
 
 function load(key, fallback) {
@@ -626,7 +627,7 @@ function setHTML(ex, s, si) {
   const p = lastFor(ex.name, si);
   const val = (v) => (v === null || v === undefined ? '' : esc(v));
   return `
-    <div class="set-row ${s.done ? 'done' : ''}" data-si="${si}">
+    <div class="set-row ${s.done ? 'done' : ''}" data-si="${si}" data-set-id="${esc(s.id)}">
       <span class="set-num">${si + 1}</span>
       <input type="text" inputmode="decimal" data-field="weight" value="${val(s.weight)}"
              placeholder="${p ? esc(p.weight) : 'kg'}" aria-label="Weight in kg">
@@ -676,6 +677,7 @@ function upsertOp(ex, s, si) {
 function startWorkout() {
   state.session = { id: uid(), date: todayISO(), startedAt: new Date().toISOString(), exercises: [] };
   prShown.clear();
+  forgetFocus();
   saveSession();
   render();
   openExerciseDialog();
@@ -843,6 +845,7 @@ function finishWorkout() {
   });
   state.session = null;
   saveSession();
+  forgetFocus();
   render();
   if (sets) toast('Workout saved 💪', 3000);
   syncThenRefresh();
@@ -1095,15 +1098,68 @@ $('#syncStatus').addEventListener('click', () => {
   syncThenRefresh();
 });
 
+/* ================= Resume where you were typing ================= */
+// Leaving the app mid-typing closes the keyboard (or Android reloads the app), which shifts the
+// page. We remember the box you were in and bring it back to the middle of the screen on return.
+
+history.scrollRestoration = 'manual'; // we decide where the page lands, not the browser
+
+function rememberFocus(input) {
+  const row = input.closest('[data-set-id]');
+  if (row && state.session) {
+    save(KEYS.focus, { sessionId: state.session.id, setId: row.dataset.setId, field: input.dataset.field });
+  }
+}
+
+function forgetFocus() {
+  try { localStorage.removeItem(KEYS.focus); } catch { /* storage blocked */ }
+}
+
+function restoreFocus() {
+  const f = load(KEYS.focus, null);
+  if (!f || !state.session || f.sessionId !== state.session.id) return;
+  const input = document.querySelector(`[data-set-id="${CSS.escape(f.setId)}"] [data-field="${f.field}"]`);
+  if (!input) return forgetFocus(); // that set was deleted
+  // Position from layout (offsetTop), not getBoundingClientRect: the screen may still be
+  // mid slide-in animation, and transforms would throw the measurement off
+  let top = 0;
+  for (let el = input; el; el = el.offsetParent) top += el.offsetTop;
+  window.scrollTo(0, top + input.offsetHeight / 2 - window.innerHeight / 2);
+  play(input, 'resume');
+}
+
+$('#main').addEventListener('focusin', (e) => {
+  if (e.target.dataset.field) rememberFocus(e.target);
+});
+// Moving on *inside* the app (tapping ✓, another button, empty space) means you're done with that box.
+// Losing focus because you left the app does not, so the box is kept for when you come back.
+$('#main').addEventListener('focusout', () => {
+  setTimeout(() => {
+    const stillInApp = document.visibilityState === 'visible' && document.hasFocus();
+    const inAnotherBox = document.activeElement && document.activeElement.dataset && document.activeElement.dataset.field;
+    if (stillInApp && !inAnotherBox) forgetFocus();
+  }, 0);
+});
+// Any tap outside a box after coming back also means you've moved on
+document.addEventListener('pointerdown', (e) => {
+  if (!e.target.closest('[data-field]')) forgetFocus();
+}, true);
+
 window.addEventListener('online', syncThenRefresh);
 window.addEventListener('offline', renderStatus);
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') sync();
+  if (document.visibilityState !== 'visible') return;
+  sync();
+  setTimeout(restoreFocus, 350); // let the keyboard finish closing and the viewport settle
+});
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted) setTimeout(restoreFocus, 350); // restored from the back/forward cache
 });
 
 /* ================= Boot ================= */
 
 render();
+requestAnimationFrame(restoreFocus); // reopened after Android closed the app mid-typing
 if (configured()) syncThenRefresh();
 else openSettings();
 

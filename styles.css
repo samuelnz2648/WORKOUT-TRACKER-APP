@@ -289,6 +289,8 @@ dialog .check-row input { display: inline-block; width: 20px; height: 20px; marg
 .collapse { animation: collapse .16s ease-in both; }
 /* Removing an exercise or deleting a workout */
 .leave { animation: leave .24s ease-in both; pointer-events: none; }
+/* The box you were typing in, brought back after leaving the app */
+.resume { animation: resume 1.8s ease-out; }
 /* Invalid input */
 .shake { animation: shake .3s; }
 /* Dialogs */
@@ -307,6 +309,7 @@ dialog[open]::backdrop { animation: fade-in .24s ease; }
 @keyframes dialog-in { from { opacity: 0; transform: translateY(16px) scale(.97); } }
 @keyframes fade-in { from { opacity: 0; } }
 @keyframes pulse { 50% { opacity: .45; } }
+@keyframes resume { 0%, 35% { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(74, 222, 128, .45); } }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
