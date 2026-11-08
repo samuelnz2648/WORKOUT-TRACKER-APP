@@ -24,9 +24,9 @@ function save(key, value) {
 
 const state = {
   config: load(KEYS.config, { url: '', token: '' }),
-  // Workout in progress: { id, date, startedAt, exercises: [{ name, sets: [{ id, weight, reps, done, loggedAt }] }] }
+  // Workout in progress: { id, date, startedAt, created: [names new this workout], exercises: [{ name, sets: [{ id, weight, reps, done, loggedAt }] }] }
   session: load(KEYS.session, null),
-  // Writes waiting for the Sheet: [{ opId, type: 'exercise'|'category'|'upsert'|'delete'|'deleteSession', ... }]
+  // Writes waiting for the Sheet: [{ opId, type: 'exercise'|'category'|'upsert'|'delete'|'deleteSession'|'deleteExercise', ... }]
   outbox: load(KEYS.outbox, []),
   // Data from the Sheet (see bootstrap_ in Code.gs)
   cache: {
@@ -695,6 +695,8 @@ function addExerciseToSession(rawName, category) {
     state.cache.categories[canonical] = category || '';
     saveCache();
     queue({ type: 'exercise', name: canonical, category: category || '' });
+    // Provisional: kept only if a set gets logged for it in this workout
+    state.session.created = [...(state.session.created || []), canonical];
   } else if (category && catOf(existing) !== category) {
     setCategory(existing, category);
   }
@@ -763,9 +765,31 @@ function removeExercise(ei) {
     const i = state.session ? state.session.exercises.indexOf(ex) : -1;
     if (i < 0) return;
     state.session.exercises.splice(i, 1);
+    // Created in this workout and now removed: it shouldn't stay in the exercise list
+    const created = state.session.created || [];
+    if (created.includes(ex.name)) {
+      state.session.created = created.filter((n) => n !== ex.name);
+      discardExercise(ex.name);
+    }
     saveSession();
     render();
   });
+}
+
+/** Forget an exercise that was created during a workout but never used. */
+function discardExercise(name) {
+  const key = name.toLowerCase();
+  // Drop its unsent writes...
+  state.outbox = state.outbox.filter((o) =>
+    !((o.type === 'exercise' || o.type === 'category') && o.name.toLowerCase() === key));
+  saveOutbox();
+  state.cache.exercises = state.cache.exercises.filter((n) => n.toLowerCase() !== key);
+  delete state.cache.categories[name];
+  delete state.cache.last[name];
+  delete state.cache.best[name];
+  saveCache();
+  // ...and remove it from the Sheet in case it already got there (kept if any set uses it)
+  queue({ type: 'deleteExercise', name });
 }
 
 function finishWorkout() {
@@ -792,6 +816,11 @@ function finishWorkout() {
     });
     saveCache();
   }
+  // Exercises created in this workout with no logged sets (incl. a discarded workout) aren't kept
+  (state.session.created || []).forEach((name) => {
+    const ex = state.session.exercises.find((e) => e.name === name);
+    if (!ex || !ex.sets.some((s) => s.done)) discardExercise(name);
+  });
   state.session = null;
   saveSession();
   render();
