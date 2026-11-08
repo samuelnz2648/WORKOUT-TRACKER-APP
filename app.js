@@ -483,6 +483,7 @@ function render() {
   // Switching between home and a workout: whole screen rises in
   const viewChanged = view !== lastView;
   if (viewChanged) {
+    window.scrollTo(0, 0); // a new screen always starts at the top
     stagger([...main.children], 40, 6);
     lastView = view;
   }
