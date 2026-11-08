@@ -270,3 +270,66 @@ dialog select, .cat-select {
   background: var(--accent); color: var(--accent-ink); font-size: .75rem; font-weight: 800;
 }
 .history-head .chev { font-size: .9rem; }
+
+/* ---------- Animation ---------- */
+:root {
+  --ease-out: cubic-bezier(.2, .8, .2, 1);
+  --ease-spring: cubic-bezier(.3, 1.6, .5, 1);
+}
+
+/* Things appearing: screens, cards, chips, the category picker */
+.enter { animation: rise .32s var(--ease-out) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(10px); } }
+
+/* New set row */
+.row-in { animation: row-in .24s var(--ease-out) both; }
+@keyframes row-in { from { opacity: 0; transform: translateY(-6px); } }
+
+/* Logging a set: tick pops, inputs glow green then settle */
+.just-done .check { animation: pop .34s var(--ease-spring); }
+.just-done input { animation: glow .7s ease-out; }
+@keyframes pop { 0% { transform: scale(.8); } 60% { transform: scale(1.12); } 100% { transform: scale(1); } }
+@keyframes glow { from { background: rgba(74, 222, 128, .35); border-color: var(--accent); } }
+
+/* Exercise total ticks up */
+.bump { display: inline-block; animation: bump .3s var(--ease-spring); }
+@keyframes bump { 50% { transform: scale(1.12); color: var(--accent); } }
+
+/* "New best!" tag */
+.pr.pop { animation: pop .45s var(--ease-spring) both; }
+
+/* History expand / collapse */
+.expand { animation: expand .26s var(--ease-out) both; }
+@keyframes expand { from { opacity: 0; transform: translateY(-8px); } }
+.collapse { animation: collapse .16s ease-in both; }
+@keyframes collapse { to { opacity: 0; transform: translateY(-6px); } }
+
+/* Removing an exercise or deleting a workout */
+.leave { animation: leave .24s ease-in both; pointer-events: none; }
+@keyframes leave { to { opacity: 0; transform: translateX(24px) scale(.97); } }
+
+/* Dialogs */
+dialog[open] { animation: dialog-in .24s var(--ease-out); }
+dialog[open]::backdrop { animation: fade-in .24s ease; }
+@keyframes dialog-in { from { opacity: 0; transform: translateY(16px) scale(.97); } }
+@keyframes fade-in { from { opacity: 0; } }
+
+/* Sync pill pulses while syncing */
+.pill { transition: color .2s, border-color .2s; }
+.pill.syncing { animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .45; } }
+
+/* Touch feedback */
+.check, .chip, .seg button, .icon, .history-head { transition: transform .12s, background-color .15s, color .15s, border-color .15s; }
+.check:active, .chip:active, .seg button:active { transform: scale(.94); }
+.history-head:active { transform: scale(.99); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}

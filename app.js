@@ -400,7 +400,7 @@ function renderStatus() {
   let text, cls;
   if (!configured()) { text = 'Not connected'; cls = 'err'; }
   else if (!navigator.onLine) { text = pending ? `Offline · ${pending} pending` : 'Offline'; cls = 'warn'; }
-  else if (state.syncing) { text = 'Syncing…'; cls = ''; }
+  else if (state.syncing) { text = 'Syncing…'; cls = 'syncing'; }
   else if (state.error) { text = pending ? `Sync error · ${pending}` : 'Sync error'; cls = 'err'; }
   else if (pending) { text = `${pending} pending`; cls = 'warn'; }
   else { text = 'Synced ✓'; cls = 'ok'; }
@@ -409,11 +409,64 @@ function renderStatus() {
   el.title = state.error || 'Tap to sync now';
 }
 
+/* ================= Animation helpers ================= */
+
+const reduceMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const pendingMarks = [];          // [selector, class] to animate after the next render
+const seenHistory = new Set();    // history cards already on screen (only new ones animate in)
+const prShown = new Set();        // exercises whose "New best!" tag has already popped
+let lastView = null;
+
+/** Animate an element after the next render (render() rebuilds the DOM). */
+function mark(selector, cls) {
+  pendingMarks.push([selector, cls]);
+}
+
+function play(el, cls) {
+  el.classList.remove(cls);
+  void el.offsetWidth; // restart the animation
+  el.classList.add(cls);
+}
+
+/** Staggered entrance for a list of elements. */
+function stagger(els, step = 35, max = 10) {
+  els.forEach((el, i) => {
+    el.style.animationDelay = `${Math.min(i, max) * step}ms`;
+    play(el, 'enter');
+  });
+}
+
+/** Play an exit animation, then resolve (instantly with reduced motion). */
+function animateOut(el, cls = 'leave', ms = 220) {
+  return new Promise((resolve) => {
+    if (!el || reduceMotion()) return resolve();
+    el.classList.add(cls);
+    setTimeout(resolve, ms);
+  });
+}
+
 function render() {
   const main = $('#main');
-  main.innerHTML = state.session ? sessionHTML() : homeHTML();
+  const view = state.session ? 'session' : 'home';
+  main.innerHTML = view === 'session' ? sessionHTML() : homeHTML();
   renderStatus();
   updateTotals();
+
+  // Switching between home and a workout: whole screen rises in
+  const viewChanged = view !== lastView;
+  if (viewChanged) {
+    stagger([...main.children], 40, 6);
+    lastView = view;
+  }
+  // History cards that weren't on screen before (e.g. just loaded or just finished)
+  if (view === 'home') {
+    const cards = [...main.querySelectorAll('.card.history')];
+    const fresh = cards.filter((c) => !seenHistory.has(c.dataset.sid));
+    if (fresh.length && !viewChanged) stagger(fresh, 45);
+    cards.forEach((c) => seenHistory.add(c.dataset.sid));
+  }
+  pendingMarks.splice(0).forEach(([sel, cls]) =>
+    document.querySelectorAll(sel).forEach((el) => play(el, cls)));
 }
 
 function homeHTML() {
@@ -570,7 +623,11 @@ function updateTotals() {
     const vol = exerciseVolume(ex);
     const best = bestFor(ex.name);
     const beaten = best && vol > best.volume;
-    el.innerHTML = `${beaten ? '<span class="pr">New best!</span> ' : ''}Total <strong>${fmt(vol)} kg</strong>`;
+    // Pop the tag only the moment it first appears
+    const pop = beaten && !prShown.has(ex.name);
+    if (beaten) prShown.add(ex.name);
+    else prShown.delete(ex.name);
+    el.innerHTML = `${beaten ? `<span class="pr${pop ? ' pop' : ''}">New best!</span> ` : ''}Total <strong>${fmt(vol)} kg</strong>`;
   });
 }
 
@@ -594,6 +651,7 @@ function upsertOp(ex, s, si) {
 
 function startWorkout() {
   state.session = { id: uid(), date: todayISO(), startedAt: new Date().toISOString(), exercises: [] };
+  prShown.clear();
   saveSession();
   render();
   openExerciseDialog();
@@ -625,7 +683,11 @@ function addExerciseToSession(rawName, category) {
     sets: Array.from({ length: lastCount }, () => ({ id: uid(), weight: null, reps: null, done: false }))
   });
   saveSession();
+  const ei = state.session.exercises.length - 1;
+  mark(`[data-ei="${ei}"]`, 'enter');
   render();
+  const card = document.querySelector(`[data-ei="${ei}"]`);
+  if (card) card.scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'nearest' });
 }
 
 function toggleSet(ei, si, rowEl) {
@@ -651,6 +713,8 @@ function toggleSet(ei, si, rowEl) {
     s.done = true;
     s.loggedAt = new Date().toISOString();
     queue(upsertOp(ex, s, si));
+    mark(`[data-ei="${ei}"] [data-si="${si}"]`, 'just-done');
+    mark(`[data-ex-total="${ei}"] strong`, 'bump');
   }
   saveSession();
   render();
@@ -660,6 +724,7 @@ function addSet(ei) {
   const ex = state.session.exercises[ei];
   ex.sets.push({ id: uid(), weight: null, reps: null, done: false });
   saveSession();
+  mark(`[data-ei="${ei}"] [data-si="${ex.sets.length - 1}"]`, 'row-in');
   render();
   const rows = document.querySelectorAll(`[data-ei="${ei}"] .set-row`);
   const input = rows[rows.length - 1] && rows[rows.length - 1].querySelector('input');
@@ -673,9 +738,11 @@ function removeExercise(ei) {
     ? `Remove ${ex.name} and its ${logged.length} logged set${logged.length === 1 ? '' : 's'}?`
     : `Remove ${ex.name}?`)) return;
   logged.forEach((s) => queue({ type: 'delete', id: s.id }));
-  state.session.exercises.splice(ei, 1);
-  saveSession();
-  render();
+  animateOut(document.querySelector(`[data-ei="${ei}"]`)).then(() => {
+    state.session.exercises.splice(ei, 1);
+    saveSession();
+    render();
+  });
 }
 
 function finishWorkout() {
@@ -718,6 +785,7 @@ function openExerciseDialog() {
   state.dialogCat = CATS.includes(state.exFilter) ? state.exFilter : null;
   renderChips();
   dlg.showModal();
+  stagger([...$('#exerciseChips').children], 20, 15);
 }
 
 const cleanName = (s) => s.trim().replace(/\s+/g, ' ');
@@ -759,8 +827,11 @@ function pickerTarget() {
 
 function updatePicker() {
   const t = pickerTarget();
-  $('#catPicker').hidden = !t;
+  const picker = $('#catPicker');
+  const wasHidden = picker.hidden;
+  picker.hidden = !t;
   if (!t) return;
+  if (wasHidden) play(picker, 'enter');
   $('#catPickerLabel').textContent = t.isNew
     ? `Category for "${t.name}"`
     : `${t.name} has no category yet. Pick one:`;
@@ -819,10 +890,18 @@ $('#main').addEventListener('click', (e) => {
     case 'more-history': loadMoreHistory(); break;
     case 'delete-session': openDeleteDialog(btn.closest('[data-sid]').dataset.sid); break;
     case 'toggle-history': {
-      const id = btn.closest('[data-sid]').dataset.sid;
-      if (state.expanded.has(id)) state.expanded.delete(id);
-      else state.expanded.add(id);
-      render();
+      const card = btn.closest('[data-sid]');
+      const id = card.dataset.sid;
+      if (state.expanded.has(id)) {
+        animateOut(card.querySelector('.history-body'), 'collapse', 160).then(() => {
+          state.expanded.delete(id);
+          render();
+        });
+      } else {
+        state.expanded.add(id);
+        mark(`[data-sid="${id}"] .history-body`, 'expand');
+        render();
+      }
       break;
     }
   }
@@ -860,6 +939,7 @@ $('#exerciseFilter').addEventListener('change', (e) => {
   state.exFilter = e.target.value;
   state.dialogCat = CATS.includes(state.exFilter) ? state.exFilter : null;
   renderChips();
+  stagger([...$('#exerciseChips').children], 20, 15);
 });
 $('#catPicker').addEventListener('click', (e) => {
   const b = e.target.closest('[data-cat]');
@@ -892,7 +972,10 @@ $('#deleteForm').addEventListener('submit', (e) => {
   $('#deleteDialog').close();
   const id = state.pendingDelete;
   state.pendingDelete = null;
-  if (id) deleteSession(id, !$('#deleteExWrap').hidden && $('#deleteEx').checked);
+  if (!id) return;
+  const removeEx = !$('#deleteExWrap').hidden && $('#deleteEx').checked;
+  animateOut(document.querySelector(`.card.history[data-sid="${id}"]`), 'leave', 260)
+    .then(() => deleteSession(id, removeEx));
 });
 
 // Settings dialog
