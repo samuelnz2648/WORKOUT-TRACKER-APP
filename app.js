@@ -1099,8 +1099,9 @@ $('#syncStatus').addEventListener('click', () => {
 });
 
 /* ================= Resume where you were typing ================= */
-// Leaving the app mid-typing closes the keyboard (or Android reloads the app), which shifts the
-// page. We remember the box you were in and bring it back to the middle of the screen on return.
+// Leaving the app mid-typing shifts the page: the keyboard closes and may reopen on return, or
+// Android reloads the app. We remember the box you were in and, on return, put it in the middle
+// of the space you can actually see: below the header and above the keyboard.
 
 history.scrollRestoration = 'manual'; // we decide where the page lands, not the browser
 
@@ -1115,21 +1116,61 @@ function forgetFocus() {
   try { localStorage.removeItem(KEYS.focus); } catch { /* storage blocked */ }
 }
 
-function restoreFocus() {
+/** The box to bring back, if there is one for the current workout. */
+function rememberedInput() {
   const f = load(KEYS.focus, null);
-  if (!f || !state.session || f.sessionId !== state.session.id) return;
+  if (!f || !state.session || f.sessionId !== state.session.id) return null;
   const input = document.querySelector(`[data-set-id="${CSS.escape(f.setId)}"] [data-field="${f.field}"]`);
-  if (!input) return forgetFocus(); // that set was deleted
+  if (!input) forgetFocus(); // that set was deleted
+  return input;
+}
+
+/** Scroll so the box sits in the middle of the visible area (between the header and the keyboard). */
+function centreInput(input) {
   // Position from layout (offsetTop), not getBoundingClientRect: the screen may still be
   // mid slide-in animation, and transforms would throw the measurement off
   let top = 0;
   for (let el = input; el; el = el.offsetParent) top += el.offsetTop;
-  window.scrollTo(0, top + input.offsetHeight / 2 - window.innerHeight / 2);
-  play(input, 'resume');
+  const header = $('.topbar').offsetHeight;
+  // visualViewport = what's actually visible (excludes the keyboard, even where the page isn't resized)
+  const visible = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  window.scrollTo(0, top + input.offsetHeight / 2 - (header + (visible - header) / 2));
 }
 
+let settleUntil = 0;
+/** Bring the box back, then keep it centred while the keyboard slides open/closed. */
+function restoreFocus() {
+  const input = rememberedInput();
+  if (!input) return;
+  centreInput(input);
+  play(input, 'resume');
+  settleUntil = Date.now() + 1500;
+  setTimeout(() => { const i = rememberedInput(); if (i) centreInput(i); }, 1500); // final check
+}
+
+/** Is the box fully visible between the header and the keyboard? */
+function inputVisible(input) {
+  const r = input.getBoundingClientRect();
+  const visible = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  return r.top >= $('.topbar').offsetHeight && r.bottom <= visible;
+}
+
+let focusedAt = 0;
+function onViewportResize() {
+  // Keyboard just opened for a box you tapped: make sure it isn't hidden behind it
+  const a = document.activeElement;
+  if (a && a.dataset && a.dataset.field && Date.now() - focusedAt < 1000 && !inputVisible(a)) centreInput(a);
+  if (Date.now() > settleUntil) return; // re-centring only right after coming back, never during normal use
+  const input = rememberedInput();
+  if (input) centreInput(input);
+}
+window.addEventListener('resize', onViewportResize);
+if (window.visualViewport) window.visualViewport.addEventListener('resize', onViewportResize);
+
 $('#main').addEventListener('focusin', (e) => {
-  if (e.target.dataset.field) rememberFocus(e.target);
+  if (!e.target.dataset.field) return;
+  focusedAt = Date.now();
+  rememberFocus(e.target);
 });
 // Moving on *inside* the app (tapping ✓, another button, empty space) means you're done with that box.
 // Losing focus because you left the app does not, so the box is kept for when you come back.
@@ -1150,10 +1191,10 @@ window.addEventListener('offline', renderStatus);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   sync();
-  setTimeout(restoreFocus, 350); // let the keyboard finish closing and the viewport settle
+  restoreFocus(); // re-centres again as the keyboard reopens (see onViewportResize)
 });
 window.addEventListener('pageshow', (e) => {
-  if (e.persisted) setTimeout(restoreFocus, 350); // restored from the back/forward cache
+  if (e.persisted) restoreFocus(); // restored from the back/forward cache
 });
 
 /* ================= Boot ================= */
