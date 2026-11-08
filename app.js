@@ -603,7 +603,7 @@ function exerciseHTML(ex, ei) {
         </div>
       </header>
       <p class="last">${esc(bestLine)}</p>
-      <div class="set-head"><span>Set</span><span>kg</span><span>Reps</span><span></span></div>
+      ${ex.sets.length ? '<div class="set-head"><span>Set</span><span>kg</span><span>Reps</span></div>' : ''}
       ${ex.sets.map((s, si) => setHTML(ex, s, si)).join('')}
       <footer>
         <button class="btn ghost small" data-action="add-set">+ Add set</button>
@@ -632,6 +632,7 @@ function setHTML(ex, s, si) {
       <input type="text" inputmode="numeric" data-field="reps" value="${val(s.reps)}"
              placeholder="${p ? esc(p.reps) : 'reps'}" aria-label="Reps">
       <button class="check" data-action="toggle-set" aria-label="${s.done ? 'Undo set' : 'Log set'}">✓</button>
+      <button class="del-set" data-action="delete-set" aria-label="Delete set ${si + 1}">✕</button>
     </div>`;
 }
 
@@ -753,6 +754,24 @@ function addSet(ei) {
   const rows = document.querySelectorAll(`[data-ei="${ei}"] .set-row`);
   const input = rows[rows.length - 1] && rows[rows.length - 1].querySelector('input');
   if (input) input.focus();
+}
+
+function deleteSet(ei, si) {
+  const ex = state.session.exercises[ei];
+  const s = ex.sets[si];
+  // Logged sets are already in the Sheet, so check first; empty/unlogged rows go straight away
+  if (s.done && !confirm(`Delete set ${si + 1} (${fmt(s.weight)} kg × ${s.reps})?`)) return;
+  animateOut(document.querySelector(`[data-ei="${ei}"] [data-si="${si}"]`), 'leave', 200).then(() => {
+    // Look it up again: indexes may have shifted during the animation
+    const i = state.session && state.session.exercises.includes(ex) ? ex.sets.indexOf(s) : -1;
+    if (i < 0) return;
+    ex.sets.splice(i, 1);
+    if (s.done) queue({ type: 'delete', id: s.id });
+    // Logged sets below it move up a number; keep the Sheet in step
+    ex.sets.forEach((x, k) => { if (k >= i && x.done) queue(upsertOp(ex, x, k)); });
+    saveSession();
+    render();
+  });
 }
 
 function removeExercise(ei) {
@@ -938,6 +957,7 @@ $('#main').addEventListener('click', (e) => {
     case 'remove-exercise': removeExercise(ei); break;
     case 'add-set': addSet(ei); break;
     case 'toggle-set': toggleSet(ei, si, row); break;
+    case 'delete-set': deleteSet(ei, si); break;
     case 'finish': finishWorkout(); break;
     case 'more-history': loadMoreHistory(); break;
     case 'delete-session': openDeleteDialog(btn.closest('[data-sid]').dataset.sid); break;
