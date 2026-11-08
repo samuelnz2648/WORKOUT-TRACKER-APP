@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f1115">
+  <title>Workout Tracker</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Workout Tracker</h1>
+    <div class="topbar-actions">
+      <button id="syncStatus" class="pill" type="button" title="Tap to sync now">…</button>
+      <button id="settingsBtn" class="icon" type="button" aria-label="Settings">⚙</button>
+    </div>
+  </header>
+
+  <main id="main"></main>
+
+  <!-- Add exercise -->
+  <dialog id="exerciseDialog">
+    <form id="exerciseForm" method="dialog">
+      <h2>Add exercise</h2>
+      <input id="exerciseName" type="text" placeholder="Search or type a new name" autocomplete="off" required>
+      <div id="exerciseChips" class="chips"></div>
+      <div class="dialog-actions">
+        <button type="button" class="btn ghost" data-close>Cancel</button>
+        <button type="submit" class="btn primary">Add</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Settings -->
+  <dialog id="settingsDialog">
+    <form id="settingsForm" method="dialog">
+      <h2>Connect your Google Sheet</h2>
+      <label>Apps Script web app URL
+        <input id="cfgUrl" type="url" placeholder="https://script.google.com/macros/s/…/exec" required>
+      </label>
+      <label>API token
+        <input id="cfgToken" type="text" placeholder="From the setup() log" autocomplete="off" required>
+      </label>
+      <p id="settingsMsg" class="msg"></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn ghost" data-close>Close</button>
+        <button type="submit" class="btn primary">Save &amp; test</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
