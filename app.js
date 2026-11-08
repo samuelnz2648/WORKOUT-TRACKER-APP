@@ -42,6 +42,7 @@ const state = {
 };
 
 state.cache.categories = state.cache.categories || {}; // { exerciseName: 'PUSH'|'PULL'|'LEGS' }
+state.cache.best = state.cache.best || {};             // { exerciseName: best previous session }
 
 const saveSession = () => save(KEYS.session, state.session);
 const saveOutbox = () => save(KEYS.outbox, state.outbox);
@@ -92,27 +93,42 @@ function setCategory(name, cat) {
 }
 
 /**
- * Workout type from the categories of the sets done:
- *   one category only      → PUSH / PULL / LEGS
- *   push + pull            → UPPER
- *   legs + upper, legs ≥ ⅔ of sets → LOWER
- *   any other mix with legs → TOTAL BODY
+ * Workout type from the categories of the exercises done:
+ *   one category only  → PUSH / PULL / LEGS
+ *   push + pull        → UPPER
+ *   legs + any upper   → TOTAL BODY
  * Uncategorised exercises are ignored.
  */
 function sessionLabel(s) {
-  const counts = { PUSH: 0, PULL: 0, LEGS: 0 };
+  const present = new Set();
   s.exercises.forEach((e) => {
     const c = catOf(e.name);
-    if (c) counts[c] += e.sets.length;
+    if (c) present.add(c);
   });
-  const legs = counts.LEGS;
-  const total = counts.PUSH + counts.PULL + legs;
-  if (!total) return '';
-  const present = CATS.filter((c) => counts[c]);
-  if (present.length === 1) return present[0];
-  if (!legs) return 'UPPER';
-  if (legs / total >= 2 / 3) return 'LOWER';
+  if (!present.size) return '';
+  if (present.size === 1) return [...present][0];
+  if (!present.has('LEGS')) return 'UPPER';
   return 'TOTAL BODY';
+}
+
+/* ================= Current best ================= */
+
+/** Best previous session for an exercise (highest total kg): { sessionId, date, volume, sets } */
+function bestFor(name) {
+  return state.cache.best[name] || bestFromHistory(name);
+}
+
+/** Fallback from loaded history, used offline or before the Sheet has answered. */
+function bestFromHistory(name) {
+  let top = null;
+  state.history.sessions.forEach((s) => {
+    if (state.session && s.id === state.session.id) return;
+    const e = s.exercises.find((x) => x.name === name);
+    if (e && (!top || e.volume > top.volume)) {
+      top = { sessionId: s.id, date: s.date, volume: e.volume, sets: e.sets };
+    }
+  });
+  return top;
 }
 
 const labelClass = (label) => 'split-' + label.toLowerCase().replace(/\s+/g, '-');
@@ -242,6 +258,7 @@ async function refresh({ quiet = true } = {}) {
   try {
     const res = await api({ action: 'bootstrap', exclude: state.session ? state.session.id : '' });
     state.cache.last = res.last || {};
+    if (res.best) state.cache.best = res.best;
     mergeExercises(res.exercises || []);
     if (res.categories) mergeCategories(res.categories);
     if (res.history) applyHistory(res.history, false);
@@ -306,7 +323,7 @@ function openDeleteDialog(id) {
   if (!s) return;
   state.pendingDelete = id;
   $('#deleteSummary').textContent =
-    `${sessionDateLabel(s)} · ${s.sets} set${s.sets === 1 ? '' : 's'} · ${fmt(s.volume)} kg. ` +
+    `${sessionDateLabel(s)} · ${s.sets} set${s.sets === 1 ? '' : 's'}. ` +
     'This permanently removes these sets from your Google Sheet.';
   const only = exclusiveExercises(s);
   $('#deleteExWrap').hidden = !only.length;
@@ -337,6 +354,8 @@ function deleteSession(id, removeExercises) {
     const prev = state.history.sessions.find((x) => x.exercises.some((y) => y.name === e.name));
     if (prev) state.cache.last[e.name] = prev.exercises.find((y) => y.name === e.name).sets;
     else delete state.cache.last[e.name];
+    // If the best came from this workout, fall back to history until the Sheet recalculates
+    if (state.cache.best[e.name] && state.cache.best[e.name].sessionId === id) delete state.cache.best[e.name];
   });
   state.cache.exercises = state.cache.exercises.filter((n) => !removedLower.has(n.toLowerCase()));
   saveCache();
@@ -475,7 +494,7 @@ function historyCardHTML(s) {
           <div class="history-date">${badge}${esc(dateLabel)}${s.pending ? ' <span class="tag">Not synced</span>' : ''}</div>
           <div class="history-meta">${meta}</div>
         </div>
-        <div class="history-vol">${fmt(s.volume)} kg<span class="chev">${open ? '▴' : '▾'}</span></div>
+        <span class="chev">${open ? '▴' : '▾'}</span>
       </button>
       ${body}
     </section>`;
@@ -484,13 +503,7 @@ function historyCardHTML(s) {
 function sessionHTML() {
   const s = state.session;
   return `
-    <div class="summary">
-      <div>
-        <span class="label">Session total</span>
-        <span class="big" id="sessionTotal">0 kg</span>
-      </div>
-      <div class="meta" id="sessionMeta"></div>
-    </div>
+    <p class="session-meta" id="sessionMeta"></p>
     ${s.exercises.length ? s.exercises.map(exerciseHTML).join('')
       : '<p class="empty">Add your first exercise to get going.</p>'}
     <button class="btn wide" data-action="add-exercise">+ Add exercise</button>
@@ -498,9 +511,9 @@ function sessionHTML() {
 }
 
 function exerciseHTML(ex, ei) {
-  const last = state.cache.last[ex.name];
-  const lastLine = last && last.length
-    ? 'Last time: ' + last.map((s) => `${fmt(s.weight)}×${s.reps}`).join(', ')
+  const best = bestFor(ex.name);
+  const bestLine = best && best.sets.length
+    ? `Current Best: ${best.sets.map((s) => `${fmt(s.weight)}×${s.reps}`).join(', ')} · ${fmt(best.volume)} kg`
     : 'No history yet';
   return `
     <section class="card" data-ei="${ei}">
@@ -511,7 +524,7 @@ function exerciseHTML(ex, ei) {
           <button class="icon" data-action="remove-exercise" aria-label="Remove ${esc(ex.name)}">✕</button>
         </div>
       </header>
-      <p class="last">${esc(lastLine)}</p>
+      <p class="last">${esc(bestLine)}</p>
       <div class="set-head"><span>Set</span><span>kg</span><span>Reps</span><span></span></div>
       ${ex.sets.map((s, si) => setHTML(ex, s, si)).join('')}
       <footer>
@@ -546,8 +559,6 @@ function setHTML(ex, s, si) {
 
 function updateTotals() {
   if (!state.session) return;
-  const total = $('#sessionTotal');
-  if (total) total.textContent = `${fmt(sessionVolume())} kg`;
   const meta = $('#sessionMeta');
   if (meta) {
     const n = sessionSetCount();
@@ -555,7 +566,11 @@ function updateTotals() {
   }
   state.session.exercises.forEach((ex, ei) => {
     const el = document.querySelector(`[data-ex-total="${ei}"]`);
-    if (el) el.innerHTML = `Total <strong>${fmt(exerciseVolume(ex))} kg</strong>`;
+    if (!el) return;
+    const vol = exerciseVolume(ex);
+    const best = bestFor(ex.name);
+    const beaten = best && vol > best.volume;
+    el.innerHTML = `${beaten ? '<span class="pr">New best!</span> ' : ''}Total <strong>${fmt(vol)} kg</strong>`;
   });
 }
 
@@ -665,10 +680,10 @@ function removeExercise(ei) {
 
 function finishWorkout() {
   const sets = sessionSetCount();
-  const vol = sessionVolume();
+  const exCount = state.session.exercises.filter((ex) => ex.sets.some((s) => s.done)).length;
   if (!sets) {
     if (!confirm('No sets logged. Discard this workout?')) return;
-  } else if (!confirm(`Finish workout?\n${sets} sets · ${fmt(vol)} kg total`)) {
+  } else if (!confirm(`Finish workout?\n${sets} sets · ${exCount} exercise${exCount === 1 ? '' : 's'}`)) {
     return;
   }
   if (sets) {
@@ -677,11 +692,19 @@ function finishWorkout() {
     state.history.sessions = [summary, ...state.history.sessions.filter((s) => s.id !== summary.id)];
     if (!existed) state.history.total += 1;
     save(KEYS.history, state.history);
+    // Update "Current Best" right away (the Sheet recalculates on next sync)
+    summary.exercises.forEach((e) => {
+      const b = state.cache.best[e.name];
+      if (!b || e.volume > b.volume) {
+        state.cache.best[e.name] = { sessionId: summary.id, date: summary.date, volume: e.volume, sets: e.sets };
+      }
+    });
+    saveCache();
   }
   state.session = null;
   saveSession();
   render();
-  if (sets) toast(`Workout saved — ${fmt(vol)} kg lifted 💪`, 3500);
+  if (sets) toast('Workout saved 💪', 3000);
   state.refreshAfterSync = true;
   sync();
 }
