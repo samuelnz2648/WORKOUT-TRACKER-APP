@@ -24,25 +24,29 @@ function save(key, value) {
 
 const state = {
   config: load(KEYS.config, { url: '', token: '' }),
-  // { id, date, startedAt, exercises: [{ name, sets: [{ id, weight, reps, done, loggedAt }] }] }
+  // Workout in progress: { id, date, startedAt, exercises: [{ name, sets: [{ id, weight, reps, done, loggedAt }] }] }
   session: load(KEYS.session, null),
-  // Pending writes to the Sheet: [{ opId, type: 'exercise'|'upsert'|'delete', ... }]
+  // Writes waiting for the Sheet: [{ opId, type: 'exercise'|'category'|'upsert'|'delete'|'deleteSession', ... }]
   outbox: load(KEYS.outbox, []),
-  // Last data from the Sheet: { exercises: [names], last: { name: [{ setNumber, weight, reps }] } }
-  cache: load(KEYS.cache, { exercises: [], last: {} }),
-  // Past sessions, newest first (see history_ in Code.gs). `pending` = finished here, not yet synced
+  // Data from the Sheet (see bootstrap_ in Code.gs)
+  cache: {
+    exercises: [],   // names
+    categories: {},  // name -> 'PUSH'|'PULL'|'LEGS'
+    last: {},        // name -> sets from the most recent session (placeholders)
+    best: {},        // name -> highest-volume previous session ("Current Best")
+    ...load(KEYS.cache, {})
+  },
+  // Past sessions, newest first. `pending` = finished here, not yet in the Sheet
   history: load(KEYS.history, { sessions: [], total: 0 }),
-  expanded: new Set(),
+  expanded: new Set(),   // history cards that are open
   loadingMore: false,
-  exFilter: 'ALL',   // add-exercise dialog filter: ALL | PUSH | PULL | LEGS | NONE
-  dialogCat: null,   // category picked in the add-exercise dialog
+  exFilter: 'ALL',       // add-exercise dialog filter: ALL | PUSH | PULL | LEGS | NONE
+  dialogCat: null,       // category picked in the add-exercise dialog
+  pendingDelete: null,   // session id awaiting delete confirmation
   syncing: false,
   error: '',
   refreshAfterSync: false
 };
-
-state.cache.categories = state.cache.categories || {}; // { exerciseName: 'PUSH'|'PULL'|'LEGS' }
-state.cache.best = state.cache.best || {};             // { exerciseName: best previous session }
 
 const saveSession = () => save(KEYS.session, state.session);
 const saveOutbox = () => save(KEYS.outbox, state.outbox);
@@ -65,6 +69,11 @@ const todayISO = () => {
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 };
 const configured = () => Boolean(state.config.url && state.config.token);
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const cleanName = (s) => s.trim().replace(/\s+/g, ' ');
+const findExercise = (name) => state.cache.exercises.find((n) => n.toLowerCase() === name.toLowerCase());
+/** A set can be logged once it has reps, and a weight that isn't negative (empty = bodyweight). */
+const validSet = (s) => s.reps > 0 && !(s.weight < 0);
 
 function toast(msg, ms = 2400) {
   const el = $('#toast');
@@ -111,6 +120,8 @@ function sessionLabel(s) {
   return 'TOTAL BODY';
 }
 
+const labelClass = (label) => 'split-' + label.toLowerCase().replace(/\s+/g, '-');
+
 /* ================= Current best ================= */
 
 /** Best previous session for an exercise (highest total kg): { sessionId, date, volume, sets } */
@@ -131,14 +142,10 @@ function bestFromHistory(name) {
   return top;
 }
 
-const labelClass = (label) => 'split-' + label.toLowerCase().replace(/\s+/g, '-');
-
 /* ================= Totals ================= */
 
 const setVolume = (s) => (s.done ? (s.weight || 0) * (s.reps || 0) : 0);
 const exerciseVolume = (ex) => ex.sets.reduce((a, s) => a + setVolume(s), 0);
-const sessionVolume = () =>
-  state.session ? state.session.exercises.reduce((a, ex) => a + exerciseVolume(ex), 0) : 0;
 const sessionSetCount = () =>
   state.session ? state.session.exercises.reduce((a, ex) => a + ex.sets.filter((s) => s.done).length, 0) : 0;
 
@@ -152,12 +159,23 @@ function lastFor(name, setIndex) {
 /* ================= API + sync ================= */
 
 async function api(payload) {
-  // text/plain avoids a CORS preflight, which Apps Script can't answer
-  const res = await fetch(state.config.url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify({ ...payload, token: state.config.token })
-  });
+  // Give up after 30 s so a dead connection can't leave sync stuck
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 30000);
+  let res;
+  try {
+    // text/plain avoids a CORS preflight, which Apps Script can't answer
+    res = await fetch(state.config.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ ...payload, token: state.config.token }),
+      signal: ctrl.signal
+    });
+  } catch (err) {
+    throw new Error(err.name === 'AbortError' ? 'Request timed out' : 'Network error');
+  } finally {
+    clearTimeout(timer);
+  }
   let data;
   try {
     data = await res.json();
@@ -252,7 +270,13 @@ function mergeCategories(fromServer) {
   saveCache();
 }
 
-/** Pull exercise list + "last time" data from the Sheet. */
+/** Sync pending writes first, then reload from the Sheet (never in parallel, so stale data can't win). */
+function syncThenRefresh() {
+  state.refreshAfterSync = true;
+  sync();
+}
+
+/** Pull exercises, placeholders, bests and history from the Sheet. */
 async function refresh({ quiet = true } = {}) {
   if (!configured() || !navigator.onLine) return false;
   try {
@@ -277,7 +301,9 @@ async function refresh({ quiet = true } = {}) {
 /* ================= History ================= */
 
 function applyHistory(h, append) {
-  const server = h.sessions || [];
+  // Workouts deleted here whose delete hasn't reached the Sheet yet shouldn't come back
+  const deleting = new Set(state.outbox.filter((o) => o.type === 'deleteSession').map((o) => o.sessionId));
+  const server = (h.sessions || []).filter((s) => !deleting.has(s.id));
   if (append) {
     const have = new Set(state.history.sessions.map((s) => s.id));
     state.history.sessions.push(...server.filter((s) => !have.has(s.id)));
@@ -289,7 +315,10 @@ function applyHistory(h, append) {
     state.history.sessions = [...keep, ...server];
   }
   const pendingCount = state.history.sessions.filter((s) => s.pending).length;
-  state.history.total = (h.total || 0) + pendingCount;
+  state.history.total = Math.max(
+    Math.max(0, (h.total || 0) - deleting.size) + pendingCount,
+    state.history.sessions.length
+  );
   save(KEYS.history, state.history);
 }
 
@@ -323,8 +352,7 @@ function openDeleteDialog(id) {
   if (!s) return;
   state.pendingDelete = id;
   $('#deleteSummary').textContent =
-    `${sessionDateLabel(s)} · ${s.sets} set${s.sets === 1 ? '' : 's'}. ` +
-    'This permanently removes these sets from your Google Sheet.';
+    `${sessionDateLabel(s)} · ${plural(s.sets, 'set')}. This permanently removes these sets from your Google Sheet.`;
   const only = exclusiveExercises(s);
   $('#deleteExWrap').hidden = !only.length;
   $('#deleteExNames').textContent = only.join(', ');
@@ -358,10 +386,11 @@ function deleteSession(id, removeExercises) {
     if (state.cache.best[e.name] && state.cache.best[e.name].sessionId === id) delete state.cache.best[e.name];
   });
   state.cache.exercises = state.cache.exercises.filter((n) => !removedLower.has(n.toLowerCase()));
+  removedNames.forEach((n) => delete state.cache.categories[n]);
   saveCache();
 
   queue({ type: 'deleteSession', sessionId: id, removeExercises: Boolean(removeExercises) });
-  state.refreshAfterSync = true;
+  syncThenRefresh();
   render();
   toast('Workout deleted');
 }
@@ -383,7 +412,6 @@ function summarizeSession(sess) {
     date: sess.date,
     start: Math.min(...times),
     end: Math.max(...times),
-    volume: sessionVolume(),
     sets: sessionSetCount(),
     exercises,
     pending: true
@@ -514,11 +542,8 @@ function historyCardHTML(s) {
   const open = state.expanded.has(s.id);
   const dateLabel = sessionDateLabel(s);
   const mins = s.start && s.end ? Math.round((s.end - s.start) / 60000) : 0;
-  const meta = [
-    `${s.sets} set${s.sets === 1 ? '' : 's'}`,
-    `${s.exercises.length} exercise${s.exercises.length === 1 ? '' : 's'}`,
-    mins >= 1 ? `${mins} min` : ''
-  ].filter(Boolean).join(' · ');
+  const meta = [plural(s.sets, 'set'), plural(s.exercises.length, 'exercise'), mins >= 1 ? `${mins} min` : '']
+    .filter(Boolean).join(' · ');
 
   const label = sessionLabel(s);
   const badge = label ? `<span class="split ${labelClass(label)}">${label}</span>` : '';
@@ -613,10 +638,7 @@ function setHTML(ex, s, si) {
 function updateTotals() {
   if (!state.session) return;
   const meta = $('#sessionMeta');
-  if (meta) {
-    const n = sessionSetCount();
-    meta.textContent = `${n} set${n === 1 ? '' : 's'} · ${state.session.exercises.length} exercise${state.session.exercises.length === 1 ? '' : 's'}`;
-  }
+  if (meta) meta.textContent = `${plural(sessionSetCount(), 'set')} · ${plural(state.session.exercises.length, 'exercise')}`;
   state.session.exercises.forEach((ex, ei) => {
     const el = document.querySelector(`[data-ex-total="${ei}"]`);
     if (!el) return;
@@ -658,9 +680,9 @@ function startWorkout() {
 }
 
 function addExerciseToSession(rawName, category) {
-  const name = rawName.trim().replace(/\s+/g, ' ');
+  const name = cleanName(rawName);
   if (!name) return;
-  const existing = state.cache.exercises.find((n) => n.toLowerCase() === name.toLowerCase());
+  const existing = findExercise(name);
   const canonical = existing || name;
 
   if (state.session.exercises.some((ex) => ex.name.toLowerCase() === canonical.toLowerCase())) {
@@ -702,7 +724,7 @@ function toggleSet(ei, si, rowEl) {
     const p = lastFor(ex.name, si);
     if (s.weight === null && p) s.weight = p.weight;
     if (s.reps === null && p) s.reps = p.reps;
-    if (!s.reps || s.reps <= 0 || (s.weight !== null && s.weight < 0)) {
+    if (!validSet(s)) {
       rowEl.classList.remove('shake');
       void rowEl.offsetWidth;
       rowEl.classList.add('shake');
@@ -734,12 +756,13 @@ function addSet(ei) {
 function removeExercise(ei) {
   const ex = state.session.exercises[ei];
   const logged = ex.sets.filter((s) => s.done);
-  if (!confirm(logged.length
-    ? `Remove ${ex.name} and its ${logged.length} logged set${logged.length === 1 ? '' : 's'}?`
-    : `Remove ${ex.name}?`)) return;
+  if (!confirm(logged.length ? `Remove ${ex.name} and its ${plural(logged.length, 'logged set')}?` : `Remove ${ex.name}?`)) return;
   logged.forEach((s) => queue({ type: 'delete', id: s.id }));
   animateOut(document.querySelector(`[data-ei="${ei}"]`)).then(() => {
-    state.session.exercises.splice(ei, 1);
+    // Look it up again: indexes may have shifted during the animation
+    const i = state.session ? state.session.exercises.indexOf(ex) : -1;
+    if (i < 0) return;
+    state.session.exercises.splice(i, 1);
     saveSession();
     render();
   });
@@ -750,7 +773,7 @@ function finishWorkout() {
   const exCount = state.session.exercises.filter((ex) => ex.sets.some((s) => s.done)).length;
   if (!sets) {
     if (!confirm('No sets logged. Discard this workout?')) return;
-  } else if (!confirm(`Finish workout?\n${sets} sets · ${exCount} exercise${exCount === 1 ? '' : 's'}`)) {
+  } else if (!confirm(`Finish workout?\n${plural(sets, 'set')} · ${plural(exCount, 'exercise')}`)) {
     return;
   }
   if (sets) {
@@ -759,8 +782,9 @@ function finishWorkout() {
     state.history.sessions = [summary, ...state.history.sessions.filter((s) => s.id !== summary.id)];
     if (!existed) state.history.total += 1;
     save(KEYS.history, state.history);
-    // Update "Current Best" right away (the Sheet recalculates on next sync)
+    // Update placeholders and "Current Best" right away (the Sheet recalculates on next sync)
     summary.exercises.forEach((e) => {
+      state.cache.last[e.name] = e.sets;
       const b = state.cache.best[e.name];
       if (!b || e.volume > b.volume) {
         state.cache.best[e.name] = { sessionId: summary.id, date: summary.date, volume: e.volume, sets: e.sets };
@@ -772,8 +796,7 @@ function finishWorkout() {
   saveSession();
   render();
   if (sets) toast('Workout saved 💪', 3000);
-  state.refreshAfterSync = true;
-  sync();
+  syncThenRefresh();
 }
 
 /* ================= Dialogs ================= */
@@ -787,9 +810,6 @@ function openExerciseDialog() {
   dlg.showModal();
   stagger([...$('#exerciseChips').children], 20, 15);
 }
-
-const cleanName = (s) => s.trim().replace(/\s+/g, ' ');
-const findExercise = (name) => state.cache.exercises.find((n) => n.toLowerCase() === name.toLowerCase());
 
 function renderChips() {
   const query = cleanName($('#exerciseName').value);
@@ -831,7 +851,10 @@ function updatePicker() {
   const wasHidden = picker.hidden;
   picker.hidden = !t;
   if (!t) return;
-  if (wasHidden) play(picker, 'enter');
+  if (wasHidden) {
+    picker.classList.remove('shake'); // otherwise a previous shake replays instead of the fade-in
+    play(picker, 'enter');
+  }
   $('#catPickerLabel').textContent = t.isNew
     ? `Category for "${t.name}"`
     : `${t.name} has no category yet. Pick one:`;
@@ -914,23 +937,36 @@ $('#main').addEventListener('input', (e) => {
   const ex = state.session.exercises[ei];
   const s = ex.sets[si];
   s[field] = num(e.target.value);
-  // Editing a logged set: keep it logged if still valid, re-sync it
+  // Editing a logged set: re-sync it while it's valid (an empty box mid-edit is fine)
   if (s.done) {
-    if (s.reps && s.reps > 0) {
-      if (s.weight === null) s.weight = 0;
-      queue(upsertOp(ex, s, si));
-    }
+    if (validSet(s)) queue(upsertOp(ex, s, si));
     updateTotals();
   }
   saveSession();
 });
 
-// Category change on an exercise card
 $('#main').addEventListener('change', (e) => {
-  if (!e.target.matches('[data-cat-select]') || !state.session) return;
-  const { ei } = locate(e.target);
-  setCategory(state.session.exercises[ei].name, e.target.value);
-  render();
+  if (!state.session) return;
+  const { ei, si } = locate(e.target);
+
+  // Category picker on an exercise card
+  if (e.target.matches('[data-cat-select]')) {
+    setCategory(state.session.exercises[ei].name, e.target.value);
+    render();
+    return;
+  }
+
+  // Left a logged set without valid reps/weight: un-log it rather than keep stale data
+  if (e.target.dataset.field) {
+    const s = state.session.exercises[ei].sets[si];
+    if (s.done && !validSet(s)) {
+      s.done = false;
+      queue({ type: 'delete', id: s.id });
+      saveSession();
+      render();
+      toast('Set un-logged. Enter reps to log it again');
+    }
+  }
 });
 
 // Exercise dialog
@@ -1006,11 +1042,10 @@ document.querySelectorAll('[data-close]').forEach((b) =>
 $('#syncStatus').addEventListener('click', () => {
   if (!configured()) return openSettings();
   state.error = '';
-  sync();
-  if (!state.outbox.length) refresh();
+  syncThenRefresh();
 });
 
-window.addEventListener('online', () => { sync(); refresh(); });
+window.addEventListener('online', syncThenRefresh);
 window.addEventListener('offline', renderStatus);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') sync();
@@ -1019,12 +1054,8 @@ document.addEventListener('visibilitychange', () => {
 /* ================= Boot ================= */
 
 render();
-if (configured()) {
-  sync();
-  refresh();
-} else {
-  openSettings();
-}
+if (configured()) syncThenRefresh();
+else openSettings();
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));

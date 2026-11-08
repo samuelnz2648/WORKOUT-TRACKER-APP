@@ -1,5 +1,5 @@
 // Bump this when you change any app file, so phones pick up the new version.
-const CACHE = 'workout-tracker-v6';
+const CACHE = 'workout-tracker-v7';
 
 const ASSETS = [
   './',
@@ -35,16 +35,16 @@ self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
 
+  const update = caches.open(CACHE).then(async (cache) => {
+    const res = await fetch(req);
+    if (res.ok) await cache.put(req, res.clone());
+    return res;
+  });
+  event.waitUntil(update.catch(() => {})); // let the background refresh finish
+
   event.respondWith(
-    caches.open(CACHE).then(async (cache) => {
-      const cached = await cache.match(req, { ignoreSearch: true });
-      const network = fetch(req)
-        .then((res) => {
-          if (res.ok) cache.put(req, res.clone());
-          return res;
-        })
-        .catch(() => cached);
-      return cached || network;
-    })
+    caches.match(req, { ignoreSearch: true })
+      .then((cached) => cached || update)
+      .catch(() => Response.error())
   );
 });
