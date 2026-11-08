@@ -201,3 +201,11 @@ dialog input {
   background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
   padding: 4px 10px; font-size: .88rem; font-variant-numeric: tabular-nums;
 }
+
+/* ---------- Delete ---------- */
+.btn.danger { background: var(--danger); border-color: var(--danger); color: #2b0a0a; }
+.danger-text { color: var(--danger); margin-top: 10px; }
+.dialog-text { color: var(--muted); margin: 0 0 14px; }
+.check-row { display: flex; gap: 10px; align-items: flex-start; color: var(--text) !important; font-size: .92rem !important; }
+.check-row[hidden] { display: none; }
+dialog .check-row input { display: inline-block; width: 20px; height: 20px; margin: 2px 0 0; flex: none; accent-color: var(--danger); }

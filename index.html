@@ -51,6 +51,22 @@
     </form>
   </dialog>
 
+  <!-- Delete workout -->
+  <dialog id="deleteDialog">
+    <form id="deleteForm" method="dialog">
+      <h2>Delete workout?</h2>
+      <p id="deleteSummary" class="dialog-text"></p>
+      <label id="deleteExWrap" class="check-row">
+        <input id="deleteEx" type="checkbox" checked>
+        <span>Also remove <strong id="deleteExNames"></strong> from your exercise list. They aren't used in any other workout.</span>
+      </label>
+      <div class="dialog-actions">
+        <button type="button" class="btn ghost" data-close>Cancel</button>
+        <button type="submit" class="btn danger">Delete</button>
+      </div>
+    </form>
+  </dialog>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="app.js"></script>

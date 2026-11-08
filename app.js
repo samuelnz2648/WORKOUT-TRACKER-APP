@@ -227,6 +227,61 @@ async function loadMoreHistory() {
   }
 }
 
+/** Exercises in this session that no other loaded workout uses. */
+function exclusiveExercises(session) {
+  const elsewhere = new Set();
+  state.history.sessions.forEach((s) => {
+    if (s.id !== session.id) s.exercises.forEach((e) => elsewhere.add(e.name.toLowerCase()));
+  });
+  return session.exercises.map((e) => e.name).filter((n) => !elsewhere.has(n.toLowerCase()));
+}
+
+function openDeleteDialog(id) {
+  const s = state.history.sessions.find((x) => x.id === id);
+  if (!s) return;
+  state.pendingDelete = id;
+  $('#deleteSummary').textContent =
+    `${sessionDateLabel(s)} · ${s.sets} set${s.sets === 1 ? '' : 's'} · ${fmt(s.volume)} kg. ` +
+    'This permanently removes these sets from your Google Sheet.';
+  const only = exclusiveExercises(s);
+  $('#deleteExWrap').hidden = !only.length;
+  $('#deleteExNames').textContent = only.join(', ');
+  $('#deleteEx').checked = true;
+  $('#deleteDialog').showModal();
+}
+
+function deleteSession(id, removeExercises) {
+  const s = state.history.sessions.find((x) => x.id === id);
+  if (!s) return;
+  const removedNames = removeExercises ? exclusiveExercises(s) : [];
+  const removedLower = new Set(removedNames.map((n) => n.toLowerCase()));
+
+  // Drop any unsent writes for this session (and for exercises being removed)
+  state.outbox = state.outbox.filter((o) =>
+    !(o.type === 'upsert' && o.set.sessionId === id) &&
+    !(o.type === 'exercise' && removedLower.has(o.name.toLowerCase())));
+  saveOutbox();
+
+  state.history.sessions = state.history.sessions.filter((x) => x.id !== id);
+  state.history.total = Math.max(0, state.history.total - 1);
+  state.expanded.delete(id);
+  save(KEYS.history, state.history);
+
+  // "Last time" placeholders now come from the newest remaining workout
+  s.exercises.forEach((e) => {
+    const prev = state.history.sessions.find((x) => x.exercises.some((y) => y.name === e.name));
+    if (prev) state.cache.last[e.name] = prev.exercises.find((y) => y.name === e.name).sets;
+    else delete state.cache.last[e.name];
+  });
+  state.cache.exercises = state.cache.exercises.filter((n) => !removedLower.has(n.toLowerCase()));
+  saveCache();
+
+  queue({ type: 'deleteSession', sessionId: id, removeExercises: Boolean(removeExercises) });
+  state.refreshAfterSync = true;
+  render();
+  toast('Workout deleted');
+}
+
 /** Summary of a just-finished session, shown in history before the Sheet confirms it. */
 function summarizeSession(sess) {
   const exercises = sess.exercises
@@ -309,14 +364,18 @@ function historyHTML() {
       : ''}`;
 }
 
-function historyCardHTML(s) {
-  const open = state.expanded.has(s.id);
+function sessionDateLabel(s) {
   const [y, m, d] = String(s.date).split('-').map(Number);
   const date = y ? new Date(y, m - 1, d) : new Date(s.start);
-  const dateLabel = date.toLocaleDateString(undefined, {
+  return date.toLocaleDateString(undefined, {
     weekday: 'short', day: 'numeric', month: 'short',
     year: date.getFullYear() !== new Date().getFullYear() ? 'numeric' : undefined
   });
+}
+
+function historyCardHTML(s) {
+  const open = state.expanded.has(s.id);
+  const dateLabel = sessionDateLabel(s);
   const mins = s.start && s.end ? Math.round((s.end - s.start) / 60000) : 0;
   const meta = [
     `${s.sets} set${s.sets === 1 ? '' : 's'}`,
@@ -333,6 +392,7 @@ function historyCardHTML(s) {
               ${e.sets.map((x) => `<span>${fmt(x.weight)} × ${x.reps}</span>`).join('')}
             </div>
           </div>`).join('')}
+        <button class="btn ghost small danger-text" data-action="delete-session">Delete workout</button>
       </div>`
     : `<p class="history-names">${esc(s.exercises.map((e) => e.name).join(', '))}</p>`;
 
@@ -595,6 +655,7 @@ $('#main').addEventListener('click', (e) => {
     case 'toggle-set': toggleSet(ei, si, row); break;
     case 'finish': finishWorkout(); break;
     case 'more-history': loadMoreHistory(); break;
+    case 'delete-session': openDeleteDialog(btn.closest('[data-sid]').dataset.sid); break;
     case 'toggle-history': {
       const id = btn.closest('[data-sid]').dataset.sid;
       if (state.expanded.has(id)) state.expanded.delete(id);
@@ -636,6 +697,15 @@ $('#exerciseForm').addEventListener('submit', (e) => {
   const name = $('#exerciseName').value;
   $('#exerciseDialog').close();
   addExerciseToSession(name);
+});
+
+// Delete dialog
+$('#deleteForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  $('#deleteDialog').close();
+  const id = state.pendingDelete;
+  state.pendingDelete = null;
+  if (id) deleteSession(id, !$('#deleteExWrap').hidden && $('#deleteEx').checked);
 });
 
 // Settings dialog
