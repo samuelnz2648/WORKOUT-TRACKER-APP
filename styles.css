@@ -180,8 +180,8 @@ main {
   background: none; border: 0; padding: 14px 14px 4px; text-align: left;
 }
 .card.history.open .history-head { padding-bottom: 12px; border-bottom: 1px solid var(--border); }
-.history-date { font-weight: 600; }
-.history-meta { color: var(--muted); font-size: .85rem; margin-top: 2px; }
+.history-date { display: block; font-weight: 600; }
+.history-meta { display: block; color: var(--muted); font-size: .85rem; margin-top: 2px; }
 .chev { color: var(--muted); font-size: .9rem; }
 .history-names {
   margin: 0; padding: 0 14px 14px; color: var(--muted); font-size: .85rem;

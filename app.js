@@ -25,7 +25,7 @@ function save(key, value) {
 
 const state = {
   config: load(KEYS.config, { url: '', token: '' }),
-  // Workout in progress: { id, date, startedAt, created: [names new this workout], exercises: [{ name, sets: [{ id, weight, reps, done, loggedAt }] }] }
+  // Workout in progress: { id, date, created: [names new this workout], exercises: [{ name, sets: [{ id, weight, reps, done, loggedAt }] }] }
   session: load(KEYS.session, null),
   // Writes waiting for the Sheet: [{ opId, type: 'exercise'|'category'|'upsert'|'delete'|'deleteSession'|'deleteExercise', ... }]
   outbox: load(KEYS.outbox, []),
@@ -125,7 +125,7 @@ const labelClass = (label) => 'split-' + label.toLowerCase().replace(/\s+/g, '-'
 
 /* ================= Current best ================= */
 
-/** Best previous session for an exercise (highest total kg): { sessionId, date, volume, sets } */
+/** Best previous session for an exercise (highest total kg): { sessionId, volume, sets } */
 function bestFor(name) {
   return state.cache.best[name] || bestFromHistory(name);
 }
@@ -137,7 +137,7 @@ function bestFromHistory(name) {
     if (state.session && s.id === state.session.id) return;
     const e = s.exercises.find((x) => x.name === name);
     if (e && (!top || e.volume > top.volume)) {
-      top = { sessionId: s.id, date: s.date, volume: e.volume, sets: e.sets };
+      top = { sessionId: s.id, volume: e.volume, sets: e.sets };
     }
   });
   return top;
@@ -200,11 +200,20 @@ function queue(op) {
     state.outbox = state.outbox.filter((o) =>
       !(o.type === 'category' && o.name.toLowerCase() === op.name.toLowerCase()));
   }
+  // Re-adding an exercise removed earlier: cancel its pending removal, or the Sheet would drop it
+  if (op.type === 'exercise') {
+    state.outbox = state.outbox.filter((o) =>
+      !(o.type === 'deleteExercise' && o.name.toLowerCase() === op.name.toLowerCase()));
+  }
   state.outbox.push(op);
+  localEdits++;
   saveOutbox();
   renderStatus();
   scheduleSync();
 }
+
+// Counts local changes, so a Sheet read that started before one can be thrown away (see refresh)
+let localEdits = 0;
 
 let syncTimer;
 function scheduleSync(delay = 800) {
@@ -249,9 +258,10 @@ async function sync() {
   }
 }
 
+/** Server list, plus exercises created here and not yet sent, minus ones being removed. */
 function mergeExercises(fromServer) {
   const pending = state.outbox.filter((o) => o.type === 'exercise').map((o) => o.name);
-  const seen = new Set();
+  const seen = new Set(state.outbox.filter((o) => o.type === 'deleteExercise').map((o) => o.name.toLowerCase()));
   state.cache.exercises = [...fromServer, ...pending].filter((n) => {
     const k = n.toLowerCase();
     if (seen.has(k)) return false;
@@ -279,9 +289,19 @@ function syncThenRefresh() {
 
 /** Pull exercises, placeholders, bests and history from the Sheet. */
 async function refresh({ quiet = true } = {}) {
-  if (!configured() || !navigator.onLine) return false;
+  if (!configured() || !navigator.onLine) {
+    if (!quiet) throw new Error("You're offline. Settings saved; they'll be used once you're back online");
+    return false;
+  }
+  const started = localEdits;
   try {
     const res = await api({ action: 'bootstrap', exclude: state.session ? state.session.id : '' });
+    // Something changed here while the Sheet was being read: this answer is already out of date.
+    // Send the change first, then read again.
+    if (localEdits !== started) {
+      syncThenRefresh();
+      return true;
+    }
     state.cache.last = res.last || {};
     if (res.best) state.cache.best = res.best;
     mergeExercises(res.exercises || []);
@@ -413,7 +433,7 @@ function summarizeSession(sess) {
     date: sess.date,
     start: Math.min(...times),
     end: Math.max(...times),
-    sets: sessionSetCount(),
+    sets: times.length,
     exercises,
     pending: true
   };
@@ -457,12 +477,15 @@ function play(el, cls) {
   el.classList.add(cls);
 }
 
-/** Staggered entrance for a list of elements. */
+/** Staggered entrance for a list of elements (one layout pass for all of them, not one each). */
 function stagger(els, step = 35, max = 10) {
+  if (!els.length) return;
   els.forEach((el, i) => {
     el.style.animationDelay = `${Math.min(i, max) * step}ms`;
-    play(el, 'enter');
+    el.classList.remove('enter');
   });
+  void els[0].offsetWidth; // restart every animation at once
+  els.forEach((el) => el.classList.add('enter'));
 }
 
 /** Play an exit animation, then resolve (instantly with reduced motion). */
@@ -521,12 +544,12 @@ function historyHTML() {
     return `<h3 class="section-title">History</h3>
       <p class="empty">Your finished workouts will show up here.</p>`;
   }
-  const loaded = sessions.filter((s) => !s.pending).length;
-  const unsyncedCount = sessions.length - loaded;
+  // "Not synced" = it still has sets waiting in the outbox
+  const unsynced = new Set(state.outbox.filter((o) => o.type === 'upsert').map((o) => o.set.sessionId));
   return `
-    <h3 class="section-title">History <span>${total} workout${total === 1 ? '' : 's'}</span></h3>
-    ${sessions.map(historyCardHTML).join('')}
-    ${loaded + unsyncedCount < total
+    <h3 class="section-title">History <span>${plural(total, 'workout')}</span></h3>
+    ${sessions.map((s) => historyCardHTML(s, unsynced.has(s.id))).join('')}
+    ${sessions.length < total
       ? `<button class="btn ghost wide" data-action="more-history">${state.loadingMore ? 'Loading…' : 'Load more'}</button>`
       : ''}`;
 }
@@ -540,7 +563,7 @@ function sessionDateLabel(s) {
   });
 }
 
-function historyCardHTML(s) {
+function historyCardHTML(s, unsynced) {
   const open = state.expanded.has(s.id);
   const dateLabel = sessionDateLabel(s);
   const mins = s.start && s.end ? Math.round((s.end - s.start) / 60000) : 0;
@@ -570,10 +593,10 @@ function historyCardHTML(s) {
   return `
     <section class="card history${open ? ' open' : ''}" data-sid="${esc(s.id)}">
       <button class="history-head" data-action="toggle-history" aria-expanded="${open}">
-        <div>
-          <div class="history-date">${badge}${esc(dateLabel)}${s.pending ? ' <span class="tag">Not synced</span>' : ''}</div>
-          <div class="history-meta">${meta}</div>
-        </div>
+        <span>
+          <span class="history-date">${badge}${esc(dateLabel)}${unsynced ? ' <span class="tag">Not synced</span>' : ''}</span>
+          <span class="history-meta">${meta}</span>
+        </span>
         <span class="chev">${open ? '▴' : '▾'}</span>
       </button>
       ${body}
@@ -675,7 +698,7 @@ function upsertOp(ex, s, si) {
 }
 
 function startWorkout() {
-  state.session = { id: uid(), date: todayISO(), startedAt: new Date().toISOString(), exercises: [] };
+  state.session = { id: uid(), date: todayISO(), exercises: [] };
   prShown.clear();
   forgetFocus();
   saveSession();
@@ -815,6 +838,14 @@ function discardExercise(name) {
 }
 
 function finishWorkout() {
+  // A logged set whose reps were cleared (e.g. Android closed the app mid-edit) isn't kept
+  state.session.exercises.forEach((ex) => ex.sets.forEach((s) => {
+    if (s.done && !validSet(s)) {
+      s.done = false;
+      queue({ type: 'delete', id: s.id });
+    }
+  }));
+  saveSession();
   const sets = sessionSetCount();
   const exCount = state.session.exercises.filter((ex) => ex.sets.some((s) => s.done)).length;
   if (!sets) {
@@ -822,22 +853,26 @@ function finishWorkout() {
   } else if (!confirm(`Finish workout?\n${plural(sets, 'set')} · ${plural(exCount, 'exercise')}`)) {
     return;
   }
+  // History may already hold an older copy of this workout (sets synced mid-workout): replace or drop it
+  const id = state.session.id;
+  const existed = state.history.sessions.some((s) => s.id === id);
+  state.history.sessions = state.history.sessions.filter((s) => s.id !== id);
   if (sets) {
     const summary = summarizeSession(state.session);
-    const existed = state.history.sessions.some((s) => s.id === summary.id);
-    state.history.sessions = [summary, ...state.history.sessions.filter((s) => s.id !== summary.id)];
+    state.history.sessions.unshift(summary);
     if (!existed) state.history.total += 1;
-    save(KEYS.history, state.history);
     // Update placeholders and "Current Best" right away (the Sheet recalculates on next sync)
     summary.exercises.forEach((e) => {
       state.cache.last[e.name] = e.sets;
       const b = state.cache.best[e.name];
-      if (!b || e.volume > b.volume) {
-        state.cache.best[e.name] = { sessionId: summary.id, date: summary.date, volume: e.volume, sets: e.sets };
-      }
+      if (!b || e.volume > b.volume) state.cache.best[e.name] = { sessionId: id, volume: e.volume, sets: e.sets };
     });
     saveCache();
+  } else if (existed) {
+    state.history.total = Math.max(0, state.history.total - 1);
   }
+  save(KEYS.history, state.history);
+  localEdits++; // these local updates are newer than any Sheet read in progress
   // Exercises created in this workout with no logged sets (incl. a discarded workout) aren't kept
   (state.session.created || []).forEach((name) => {
     const ex = state.session.exercises.find((e) => e.name === name);
@@ -975,7 +1010,7 @@ $('#main').addEventListener('click', (e) => {
         });
       } else {
         state.expanded.add(id);
-        mark(`[data-sid="${id}"] .history-body`, 'expand');
+        mark(`[data-sid="${CSS.escape(id)}"] .history-body`, 'expand');
         render();
       }
       break;
@@ -1063,7 +1098,7 @@ $('#deleteForm').addEventListener('submit', (e) => {
   state.pendingDelete = null;
   if (!id) return;
   const removeEx = !$('#deleteExWrap').hidden && $('#deleteEx').checked;
-  animateOut(document.querySelector(`.card.history[data-sid="${id}"]`), 'leave', 260)
+  animateOut(document.querySelector(`.card.history[data-sid="${CSS.escape(id)}"]`), 'leave', 260)
     .then(() => deleteSession(id, removeEx));
 });
 
@@ -1080,7 +1115,8 @@ $('#settingsForm').addEventListener('submit', async (e) => {
     await refresh({ quiet: false });
     msg.className = 'msg ok';
     msg.textContent = `Connected ✓ ${state.cache.exercises.length} exercises found`;
-    sync();
+    // Unsent changes: send them, then reload so the Sheet's answer includes them
+    if (state.outbox.length) syncThenRefresh();
   } catch (err) {
     msg.className = 'msg err';
     msg.textContent = err.message;
@@ -1164,8 +1200,8 @@ function onViewportResize() {
   const input = rememberedInput();
   if (input) centreInput(input);
 }
-window.addEventListener('resize', onViewportResize);
-if (window.visualViewport) window.visualViewport.addEventListener('resize', onViewportResize);
+// visualViewport also fires when the window resizes, so listening to both would run this twice
+(window.visualViewport || window).addEventListener('resize', onViewportResize);
 
 $('#main').addEventListener('focusin', (e) => {
   if (!e.target.dataset.field) return;

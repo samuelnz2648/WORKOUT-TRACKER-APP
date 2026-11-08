@@ -1,5 +1,5 @@
 // Bump this when you change any app file, so phones pick up the new version.
-const CACHE = 'workout-tracker-v12';
+const CACHE = 'workout-tracker-v13';
 
 const ASSETS = [
   './',
